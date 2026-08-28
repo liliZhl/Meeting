@@ -1,0 +1,38 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+env/
+
+# ===== 构建产物 =====
+build/
+dist/
+
+# ===== 运行时（模型 / ffmpeg / FunASR 源码 / wheels，体积大且可再生）=====
+runtime/
+
+# ===== 运行时生成 =====
+logs/
+recordings/
+*.log
+
+# ===== 配置（含个人 API Key，不入库）=====
+config.json
+
+# ===== 测试音频 / 临时文件 =====
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.tmp
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp

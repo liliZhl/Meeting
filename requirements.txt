@@ -1,0 +1,55 @@
+# 智能会议纪要工具 - 依赖清单
+# 目标环境：Windows 64 位，Python 3.11，NVIDIA GPU（CUDA 12.1，可选，无 GPU 自动降级 CPU）
+#
+# 安装说明：
+#   1) 先装 torch（CUDA 版，需要 NVIDIA 显卡时）：
+#        pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#      （无 GPU 用 CPU 版：pip install torch==2.5.1 torchaudio==2.5.1）
+#   2) 再装 FunASR（说话人分离需从源码安装）：
+#        pip install git+https://github.com/modelscope/FunASR.git
+#   3) 最后装其余依赖：
+#        pip install -r requirements.txt
+
+# --- 核心 ---
+funasr>=1.4.5
+modelscope==1.39.1
+numpy==2.4.6
+scipy==1.17.1
+
+# --- 音频处理 ---
+PyAudio==0.2.14
+pydub==0.25.1
+librosa==0.11.0
+soundfile==0.14.0
+audioread==3.1.0
+
+# --- GUI ---
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.2
+PyQt6_sip==13.12.0
+
+# --- AI 总结（DeepSeek，OpenAI 兼容）---
+openai==3.3.1
+
+# --- 打包 ---
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+
+# --- FunASR 运行时依赖（说话人分离：cam++/fsmn-vad/ct-punc）---
+torch==2.5.1
+torchaudio==2.5.1
+torch-complex==0.4.4
+kaldiio==2.18.1
+sentencepiece==0.2.2
+tiktoken==0.14.0
+tokenizers==0.23.1
+transformers==5.16.1
+omegaconf==2.3.1
+hydra-core==1.3.5
+jieba==0.42.1
+soxr==1.1.0
+scikit-learn==1.9.0
+umap-learn==0.5.12
+pynndescent==0.6.0
+numba==0.67.0
+llvmlite==0.49.0
