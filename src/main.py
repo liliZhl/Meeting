@@ -111,7 +111,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QTextEdit, QLabel, QFileDialog, QMessageBox, QDialog,
-        QLineEdit, QDialogButtonBox, QProgressDialog, QFrame, QStatusBar,
+        QLineEdit, QComboBox, QDialogButtonBox, QProgressDialog, QFrame, QStatusBar,
         QProgressBar, QFormLayout, QPlainTextEdit, QSplitter,
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent
@@ -158,6 +158,7 @@ DEFAULT_CONFIG = {
     "deepseek_model": "deepseek-chat",
     "theme": "dark",
     "model_dir": "mod",           # 模型目录（相对 EXE 或绝对路径）
+    "asr_model": "fun-asr-nano",  # 识别模型: fun-asr-nano / sensevoice / paraformer
 }
 
 
@@ -366,17 +367,18 @@ class TranscriptionWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)    # 阶段状态文本
 
-    def __init__(self, audio_path: str, model_dir: str, audio_name: str = ""):
+    def __init__(self, audio_path: str, model_dir: str, audio_name: str = "", asr_model: str = None):
         super().__init__()
         self.audio_path = audio_path
         self.model_dir = model_dir
         self.audio_name = audio_name or Path(audio_path).name
+        self.asr_model = asr_model
 
     def run(self):
         try:
             from model_manager import get_manager
             # 单例 manager：若后台尚未加载完成则同步等待
-            manager = get_manager(model_root=self.model_dir)
+            manager = get_manager(model_root=self.model_dir, asr_model=self.asr_model)
             if not manager.is_ready():
                 self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
             else:
@@ -478,7 +480,7 @@ class ConfigDialog(QDialog):
         super().__init__(parent)
         self.config = config
         self.setWindowTitle("配置 - 智能会议纪要工具")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self._build_ui()
         self._load_values()
 
@@ -500,6 +502,26 @@ class ConfigDialog(QDialog):
         self.model_dir_edit = QLineEdit()
         form.addRow("模型目录：", self.model_dir_edit)
 
+        # 语音识别模型选择（延迟 import，避免启动卡顿）
+        from asr_engine import ASR_MODELS, MODEL_NANO
+        self.asr_model_combo = QComboBox()
+        self._asr_model_keys = list(ASR_MODELS.keys())
+        for k in self._asr_model_keys:
+            self.asr_model_combo.addItem(ASR_MODELS[k]["label"], k)
+        self.asr_model_combo.setToolTip(
+            "识别引擎：Fun-ASR-Nano 需 GPU/强 CPU（质量最高）；\n"
+            "SenseVoice / Paraformer 体积小、CPU 友好，适合无独显电脑。\n"
+            "切换后需重启应用生效（首次加载新模型需下载对应文件）。"
+        )
+        form.addRow("语音识别模型：", self.asr_model_combo)
+
+        # 模型说明（随选择更新）
+        self.asr_model_desc = QLabel()
+        self.asr_model_desc.setStyleSheet("color: gray; font-size: 11px;")
+        self.asr_model_desc.setWordWrap(True)
+        self.asr_model_combo.currentIndexChanged.connect(self._on_asr_model_changed)
+        form.addRow("", self.asr_model_desc)
+
         layout.addLayout(form)
 
         tip = QLabel("提示：API Key 仅保存在本地 config.json，不会上传。")
@@ -515,11 +537,21 @@ class ConfigDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _on_asr_model_changed(self, idx: int):
+        from asr_engine import ASR_MODELS
+        if 0 <= idx < len(self._asr_model_keys):
+            self.asr_model_desc.setText(ASR_MODELS[self._asr_model_keys[idx]]["desc"])
+
     def _load_values(self):
         self.api_key_edit.setText(self.config.get("deepseek_api_key", ""))
         self.base_url_edit.setText(self.config.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"]))
         self.model_edit.setText(self.config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"]))
         self.model_dir_edit.setText(self.config.get("model_dir", DEFAULT_CONFIG["model_dir"]))
+        # 恢复已保存的识别模型选择
+        cur = self.config.get("asr_model", "")
+        idx = self._asr_model_keys.index(cur) if cur in self._asr_model_keys else 0
+        self.asr_model_combo.setCurrentIndex(idx)
+        self._on_asr_model_changed(idx)
 
     def _on_accept(self):
         key = self.api_key_edit.text().strip()
@@ -530,8 +562,11 @@ class ConfigDialog(QDialog):
         self.config.set("deepseek_base_url", self.base_url_edit.text().strip())
         self.config.set("deepseek_model", self.model_edit.text().strip())
         self.config.set("model_dir", self.model_dir_edit.text().strip() or "mod")
+        cur = self.asr_model_combo.currentData()
+        if cur:
+            self.config.set("asr_model", cur)
         self.config.save()
-        logger.info("配置已更新")
+        logger.info(f"配置已更新（asr_model={cur}）")
         self.accept()
 
 
@@ -585,13 +620,20 @@ class MainWindow(QMainWindow):
         mp = Path(model_dir)
         if not mp.is_absolute():
             mp = APP_DIR / model_dir
-        if not (mp / "fun-asr-nano" / "model.pt").exists():
-            logger.warning("模型目录未就绪，跳过启动预加载")
+        # 按配置的识别模型检查对应主模型文件是否就绪
+        try:
+            from asr_engine import ASR_MODELS, DEFAULT_ASR_MODEL
+        except Exception:
+            return
+        model_key = self.config.get("asr_model", DEFAULT_ASR_MODEL)
+        sub = model_key if model_key in ASR_MODELS else DEFAULT_ASR_MODEL
+        if not (mp / sub).exists():
+            logger.warning(f"模型目录未就绪（{sub}），跳过启动预加载")
             return
 
         try:
             from model_manager import get_manager
-            manager = get_manager(model_root=str(mp))
+            manager = get_manager(model_root=str(mp), asr_model=sub)
         except Exception as e:
             logger.warning(f"ModelManager 初始化失败，跳过预加载: {e}")
             return
@@ -756,20 +798,34 @@ class MainWindow(QMainWindow):
         self.btn_config.clicked.connect(self.on_config_clicked)
 
     # ---------- 首次运行 ----------
+    def _check_model_status(self) -> str:
+        """返回模型状态文本：就绪的模型名 / 未就绪原因。
+
+        按配置中的 asr_model 检查对应主模型是否存在（VAD/说话人公共组件
+        由引擎加载时统一校验）。返回的字符串供状态栏显示。
+        """
+        try:
+            from asr_engine import ASR_MODELS
+        except Exception:
+            return "⚠️ 模型模块不可用"
+        model_key = self.config.get("asr_model", "fun-asr-nano")
+        sub = model_key if model_key in ASR_MODELS else "fun-asr-nano"
+        model_dir = self.config.get("model_dir", "mod")
+        mp = Path(model_dir)
+        if not mp.is_absolute():
+            mp = APP_DIR / model_dir
+        if (mp / sub).exists():
+            return f"✅ 模型已就绪（{ASR_MODELS[sub]['label']}）"
+        return f"⚠️ 模型未就绪，请检查 mod/{sub} 目录"
+
     def _check_first_run(self):
         if not self.config.get("deepseek_api_key", ""):
             logger.info("首次运行：API Key 为空，弹出配置引导")
             QTimer.singleShot(300, self._show_first_run_dialog)
-        # 检查模型目录
-        model_dir = self.config.get("model_dir", "mod")
-        model_path = Path(model_dir)
-        if not model_path.is_absolute():
-            model_path = APP_DIR / model_dir
-        if not model_path.exists() or not (model_path / "fun-asr-nano" / "model.pt").exists():
-            logger.warning(f"模型目录未就绪: {model_path}")
-            self.lbl_status.setText("⚠️ 模型未就绪，请检查 mod 目录")
-        else:
-            self.lbl_status.setText("✅ 就绪（模型已检测到）")
+        # 检查模型目录（按配置的识别模型）
+        status = self._check_model_status()
+        logger.info(f"模型状态检查: {status}")
+        self.lbl_status.setText(status)
 
     def _show_first_run_dialog(self):
         QMessageBox.information(
@@ -780,6 +836,21 @@ class MainWindow(QMainWindow):
         )
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
+        # 配置弹窗可能修改了识别模型：重置并重新预加载
+        self._restart_preload_after_config()
+
+    def _restart_preload_after_config(self):
+        """配置弹窗关闭后调用：若管理器已存在则重置，并重新按新配置预加载。"""
+        try:
+            import model_manager as _mm
+            if _mm._default_manager is not None:
+                _mm._default_manager.reset()
+                logger.info("配置变更后 manager 已重置")
+        except Exception as e:
+            logger.warning(f"重置 manager 失败: {e}")
+        self._start_model_preload()
+        # 立即刷新状态栏模型状态
+        self.lbl_status.setText(self._check_model_status())
 
     # ---------- 事件：录音 ----------
     def on_record_clicked(self):
@@ -883,9 +954,10 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "正在转写…")
         self.txt_transcript.setPlainText("转写中，请稍候（首次会加载模型，可能需要一点时间）…")
         model_dir = self.config.get("model_dir", "mod")
+        asr_model = self.config.get("asr_model", "fun-asr-nano")
         self.transcriber = TranscriptionWorker(
             audio_path=self.current_audio, model_dir=model_dir,
-            audio_name=self.current_audio_name,
+            audio_name=self.current_audio_name, asr_model=asr_model,
         )
         self.transcriber.progress.connect(self._on_transcribe_progress)
         self.transcriber.finished.connect(self._on_transcribe_finished)
@@ -977,8 +1049,16 @@ class MainWindow(QMainWindow):
     # ---------- 事件：配置 ----------
     def on_config_clicked(self):
         logger.info("[按钮] 点击「配置」")
+        old_model = self.config.get("asr_model", "fun-asr-nano")
+        old_dir = self.config.get("model_dir", "mod")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
+        new_model = self.config.get("asr_model", old_model)
+        new_dir = self.config.get("model_dir", old_dir)
+        # 若模型或目录变了：重置 manager 并重新预加载，下次转写用新模型
+        if new_model != old_model or new_dir != old_dir:
+            logger.info(f"模型配置变更（{old_model}->{new_model}），重置并重新预加载")
+            self._restart_preload_after_config()
 
     # ---------- 辅助 ----------
     def _set_busy(self, busy, text=""):

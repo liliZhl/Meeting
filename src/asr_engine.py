@@ -7,10 +7,14 @@ ASR 推理引擎 — 进程内调用 FunASR AutoModel（含说话人分离）
   便于 PyInstaller 打包与分发（拷给别人零依赖）。
 
 模型链路（说话人分离）：
-  Fun-ASR-Nano-2512（ASR 识别，LLM 架构 800M）
-  + fsmn-vad（语音活动检测，切分长音频）
-  + cam++（说话人嵌入，区分谁在说话）
-  + ct-punc（标点恢复）
+  主识别模型可选（用户在配置中自选）：
+    - Fun-ASR-Nano-2512（LLM 架构 800M，GPU/强 CPU，质量最高）
+    - SenseVoice-Small（~1GB，CPU 可实时，多语种，带情感检测）
+    - Paraformer-large（~1GB，中文最准，字级时间戳）
+  公共组件：
+    + fsmn-vad（语音活动检测，切分长音频）
+    + cam++（说话人嵌入，区分谁在说话）
+    + ct-punc（标点恢复，仅 Paraformer 需要）
 
 输出：结构化转写结果（句子级：时间戳 + 说话人 + 文本），
       可再格式化为带时间戳与说话人标签的纯文本。
@@ -31,15 +35,78 @@ from pathlib import Path
 
 logger = logging.getLogger("MeetingAssistant.ASR")
 
+
+def clean_asr_text(text: str) -> str:
+    """清理 ASR 输出的富文本标签与空白。
+
+    SenseVoice 输出形如 '<|zh|><|HAPPY|><|Speech|><|withitn|>文本'，
+    带语言/情感/事件/文本规范化标签；funasr 只在部分路径（VAD 拼接）
+    剥离，直接透传时仍会残留，故解析层统一清理。对其它模型无副作用。
+    """
+    import re
+    if not text:
+        return ""
+    text = re.sub(r"<\|[^|]*\|>", "", text)
+    return text.strip()
+
 # ---------------------------------------------------------------------------
 # 本地模型子目录名（相对 model_root）
 # ---------------------------------------------------------------------------
-SUB_ASR = "fun-asr-nano"       # 主识别模型（Fun-ASR-Nano-2512）
-SUB_VAD = "fsmn-vad"           # 语音活动检测
-SUB_SPK = "cam++"              # 说话人嵌入（cam++）
-SUB_PUNC = "ct-punc"           # 标点恢复
+SUB_VAD = "fsmn-vad"           # 语音活动检测（公共组件）
+SUB_SPK = "cam++"              # 说话人嵌入（cam++，公共组件）
+SUB_PUNC = "ct-punc"           # 标点恢复（Nano/SenseVoice 自带标点时可不用）
+
+# 可选主识别模型（用户在配置里自选，适应有无 GPU 的机器）
+MODEL_NANO = "fun-asr-nano"      # Fun-ASR-Nano-2512：LLM 架构 2GB，GPU 旗舰（中英日+方言）
+MODEL_SENSEVOICE = "sensevoice"  # SenseVoice-Small ~1GB：CPU 可实时，50+ 语种，带情感/事件
+MODEL_PARAFORMER = "paraformer"  # Paraformer-large ~1GB：中文最准之一，CPU 较快
+
+# 模型注册表：key -> 配置
+#   dir:       mod/ 下的子目录名
+#   label:     UI 显示名
+#   desc:      一句话说明（CPU/GPU 适用性）
+#   llm:       True=LLM 架构（需 llm_kwargs 抑制重复幻觉；自带标点）
+#   vad_kwargs: 加载时透传的 VAD 参数
+#   gen_extra: generate 时附加的 kwargs
+ASR_MODELS = {
+    MODEL_NANO: {
+        "label": "Fun-ASR-Nano（高精度 · 需 GPU 或强 CPU）",
+        "desc": "LLM 架构 800M，中英日+方言+口音，识别质量最高；CPU 上慢（约 0.5x 实时）",
+        "llm": True,
+        "gen_extra": {
+            "language": "中文",
+            "itn": True,
+            # 抑制 LLM 解码重复幻觉（"幺幺幺…""包子包子…"）——2026-09-02 实测
+            "llm_kwargs": {"repetition_penalty": 1.15, "no_repeat_ngram_size": 3},
+        },
+    },
+    MODEL_SENSEVOICE: {
+        "label": "SenseVoice-Small（CPU 首选 · 快速）",
+        "desc": "~1GB，非自回归，CPU 可实时；50+ 语种（中英日韩粤等），自带标点与情感检测",
+        "llm": False,
+        "gen_extra": {
+            "language": "auto",
+            "use_itn": True,
+            "ban_emo_unk": True,   # 不输出 <|HAPPY|> 等情感标签
+        },
+    },
+    MODEL_PARAFORMER: {
+        "label": "Paraformer-large（中文会议 · 字级时间戳）",
+        "desc": "~1GB，纯中文最准之一，CTC 输出字级精确时间戳；CPU 较快",
+        "llm": False,
+        "gen_extra": {
+            "language": "zh",
+            # 注意：batch_size 由 transcribe() 统一传入，这里不重复设置
+            # pred_timestamp: Paraformer 输出字级时间戳的必要开关，
+            #   缺省时无 timestamp，说话人分离/切句会退化为 VAD 粒度
+            "pred_timestamp": True,
+            "sentence_timestamp": True,
+        },
+    },
+}
 
 DEFAULT_MODEL_ROOT = "mod"
+DEFAULT_ASR_MODEL = MODEL_NANO   # 默认仍用 Nano（有 GPU 目标机）
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +188,8 @@ class ASREngine:
     注：引擎实例可常驻复用（模型加载一次，多次转写）。
     """
 
-    def __init__(self, model_root: str = DEFAULT_MODEL_ROOT, device: str = None):
+    def __init__(self, model_root: str = DEFAULT_MODEL_ROOT, device: str = None,
+                 asr_model: str = None):
         # 归一化模型根目录为绝对路径
         p = Path(model_root)
         if not p.is_absolute():
@@ -137,10 +205,18 @@ class ASREngine:
                 p = Path(model_root).resolve()
         self.model_root = str(p)
 
+        # 主识别模型选择（默认 fun-asr-nano）
+        self.asr_model = asr_model or DEFAULT_ASR_MODEL
+        if self.asr_model not in ASR_MODELS:
+            logger.warning(f"未知的 ASR 模型 '{self.asr_model}'，回退到 {DEFAULT_ASR_MODEL}")
+            self.asr_model = DEFAULT_ASR_MODEL
+        self._model_cfg = ASR_MODELS[self.asr_model]
+
         self.device = device or self._detect_device()
         self.model = None
         self._loading = False
-        logger.info(f"ASREngine 初始化，device={self.device}, model_root={self.model_root}")
+        logger.info(f"ASREngine 初始化，device={self.device}, model_root={self.model_root}, "
+                    f"asr_model={self.asr_model}")
 
     # ---- 路径解析 ----
     def _sub(self, name: str) -> str:
@@ -148,12 +224,22 @@ class ASREngine:
         return str(Path(self.model_root) / name)
 
     def _check_local_models(self) -> list:
-        """检查本地模型是否齐全，返回缺失列表。"""
+        """检查本地模型是否齐全，返回缺失列表。
+
+        主模型按当前所选 asr_model 检查；公共组件（vad/spk）始终需要；
+        ct-punc 仅 Paraformer 需要（Nano/SenseVoice 自带标点）。
+        """
         missing = []
-        for sub in (SUB_ASR, SUB_VAD, SUB_SPK, SUB_PUNC):
-            d = Path(self._sub(sub))
-            if not d.exists():
+        # 主识别模型
+        if not Path(self._sub(self.asr_model)).exists():
+            missing.append(self.asr_model)
+        # 公共组件
+        for sub in (SUB_VAD, SUB_SPK):
+            if not Path(self._sub(sub)).exists():
                 missing.append(sub)
+        # Paraformer 需要 ct-punc（切句/标点），Nano/SenseVoice 自带
+        if self.asr_model == MODEL_PARAFORMER and not Path(self._sub(SUB_PUNC)).exists():
+            missing.append(SUB_PUNC)
         return missing
 
     # ---- 设备检测 ----
@@ -188,7 +274,8 @@ class ASREngine:
         self._loading = True
         try:
             if progress_callback:
-                progress_callback("加载模型", "正在加载 Fun-ASR-Nano + 说话人分离模型…")
+                progress_callback("加载模型",
+                                  f"正在加载 {self._model_cfg['label']} + 说话人分离模型…")
 
             # 校验本地模型齐全
             missing = self._check_local_models()
@@ -197,18 +284,20 @@ class ASREngine:
 
             from funasr import AutoModel
 
+            asr_dir = self._sub(self.asr_model)
+
             # Fun-ASR-Nano 是 LLM 架构。funasr 1.4.5 已内置其实现，
             # trust_remote_code=True 会自动加载模型目录内的 model.py。
             # 关键：model.py 依赖同目录的 ctc.py 和 tools/（from tools.utils import forced_align），
             # 故需把模型目录加入 sys.path 并切换 cwd，确保依赖可导入。
-            asr_dir = self._sub(SUB_ASR)
+            # （SenseVoice/Paraformer 不依赖本地 model.py，切换无副作用。）
             import sys
             if asr_dir not in sys.path:
                 sys.path.insert(0, asr_dir)
             os.chdir(asr_dir)
 
-            logger.info("开始加载 FunASR AutoModel（本地路径 + VAD + cam++ + punc）")
-            self.model = AutoModel(
+            # 通用加载参数：本地主模型 + VAD + 说话人（+ Paraformer 用 ct-punc）
+            load_kwargs = dict(
                 model=asr_dir,                  # 本地主模型路径
                 trust_remote_code=True,
                 vad_model=self._sub(SUB_VAD),   # 本地 VAD
@@ -217,6 +306,12 @@ class ASREngine:
                 device=self.device,
                 disable_update=True,            # 关闭版本检查，避免联网
             )
+            if self.asr_model == MODEL_PARAFORMER:
+                # Paraformer 不带标点，需 ct-punc 参与分句/说话人切分
+                load_kwargs["punc_model"] = self._sub(SUB_PUNC)
+
+            logger.info(f"开始加载 FunASR AutoModel（{self.asr_model} + VAD + cam++）")
+            self.model = AutoModel(**load_kwargs)
             logger.info("模型加载完成")
             return True
         except Exception as e:
@@ -244,21 +339,14 @@ class ASREngine:
         if progress_callback:
             progress_callback("转写中", f"正在识别「{Path(audio_path).name}」…")
 
-        logger.info(f"开始转写: {audio_path} (实际转写文件: {wav_path})")
+        logger.info(f"开始转写: {audio_path} (实际转写文件: {wav_path}, 模型: {self.asr_model})")
+        # 模型专属 generate 参数（Nano 的 llm_kwargs 抑制重复幻觉等）
+        gen_kwargs = dict(self._model_cfg["gen_extra"])
         res = self.model.generate(
             input=[wav_path],
             cache={},
             batch_size=1,
-            language="中文",
-            itn=True,
-            # 抑制 LLM 解码重复幻觉（"幺幺幺…""包子包子…"）——2026-09-02 实测
-            # 默认解码在口音/噪声段会陷入重复 token 死循环直到 max_new_tokens；
-            # llm_kwargs 透传到 HF generate：repetition_penalty 对已生成 token 降权，
-            # no_repeat_ngram_size 禁止 3-gram 重复。A/B 实测可消除长重复且识别更准。
-            llm_kwargs={
-                "repetition_penalty": 1.15,
-                "no_repeat_ngram_size": 3,
-            },
+            **gen_kwargs,
         )
 
         result = self._parse_result(res)
@@ -334,7 +422,7 @@ class ASREngine:
                 sentence_info = first.get("sentence_info", [])
                 if sentence_info:
                     for sent in sentence_info:
-                        text = (sent.get("sentence") or sent.get("text") or "").strip()
+                        text = clean_asr_text(sent.get("sentence") or sent.get("text") or "")
                         if not text:
                             continue
                         spk0 = sent.get("spk")
@@ -354,7 +442,7 @@ class ASREngine:
                         })
                     return TranscriptionResult(sentences, speakers)
                 # 无 sentence_info：整体文本兜底为单句
-                plain = (first.get("text") or "").strip()
+                plain = clean_asr_text(first.get("text") or "")
                 if plain:
                     sentences.append({
                         "start_ms": None, "end_ms": None,
@@ -365,8 +453,8 @@ class ASREngine:
             logger.warning(f"解析转写结果失败: {e}")
 
         if isinstance(res, list) and res:
-            raw = str(res[0].get("text", ""))
-            if raw.strip():
+            raw = clean_asr_text(str(res[0].get("text", "")))
+            if raw:
                 sentences.append({
                     "start_ms": None, "end_ms": None,
                     "speaker": None, "text": raw.strip(),
@@ -375,8 +463,9 @@ class ASREngine:
 
 
 def transcribe_audio(audio_path: str, model_root: str = DEFAULT_MODEL_ROOT,
-                     device: str = None, progress_callback=None) -> TranscriptionResult:
+                     device: str = None, asr_model: str = None,
+                     progress_callback=None) -> TranscriptionResult:
     """一次性转写（创建引擎 -> 加载 -> 转写），返回结构化结果。"""
-    engine = ASREngine(model_root=model_root, device=device)
+    engine = ASREngine(model_root=model_root, device=device, asr_model=asr_model)
     engine.load_model(progress_callback=progress_callback)
     return engine.transcribe(audio_path, progress_callback=progress_callback)

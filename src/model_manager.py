@@ -36,15 +36,18 @@ class ModelManager:
     _instance_lock = threading.Lock()
 
     @classmethod
-    def instance(cls, model_root: str = None, device: str = None) -> "ModelManager":
-        """获取全局单例。首次调用可指定 model_root/device。"""
+    def instance(cls, model_root: str = None, device: str = None,
+                 asr_model: str = None) -> "ModelManager":
+        """获取全局单例。首次调用可指定 model_root/device/asr_model。"""
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
-                    cls._instance = cls(model_root=model_root, device=device)
+                    cls._instance = cls(model_root=model_root, device=device,
+                                        asr_model=asr_model)
         return cls._instance
 
-    def __init__(self, model_root: str = None, device: str = None):
+    def __init__(self, model_root: str = None, device: str = None,
+                 asr_model: str = None):
         self._lock = threading.Lock()          # 串行化 加载/推理
         self._state_lock = threading.Lock()    # 保护状态字段
         self._engine = None
@@ -57,6 +60,7 @@ class ModelManager:
         # 预解析默认参数
         self._model_root = model_root
         self._device = device
+        self._asr_model = asr_model
         # 就绪事件：等待模型就绪的线程在此阻塞
         self._ready_event = threading.Event()
 
@@ -70,6 +74,13 @@ class ModelManager:
     def error(self) -> str:
         with self._state_lock:
             return self._error
+
+    @property
+    def asr_model(self) -> str:
+        """当前引擎所用的主识别模型名（未加载时返回配置值）。"""
+        if self._engine is not None:
+            return getattr(self._engine, "asr_model", self._asr_model)
+        return self._asr_model
 
     @property
     def engine(self):
@@ -139,6 +150,7 @@ class ModelManager:
                 engine = self._engine_cls(
                     model_root=self._model_root,
                     device=self._device,
+                    asr_model=self._asr_model,
                 )
                 engine.load_model(progress_callback=progress_callback)
                 self._engine = engine
@@ -184,13 +196,14 @@ _default_manager = None
 _default_lock = threading.Lock()
 
 
-def get_manager(model_root: str = None, device: str = None) -> ModelManager:
+def get_manager(model_root: str = None, device: str = None,
+                asr_model: str = None) -> ModelManager:
     """获取全局默认 ModelManager（供主程序使用）。"""
     global _default_manager
     if _default_manager is None:
         with _default_lock:
             if _default_manager is None:
                 _default_manager = ModelManager.instance(
-                    model_root=model_root, device=device,
+                    model_root=model_root, device=device, asr_model=asr_model,
                 )
     return _default_manager
