@@ -54,6 +54,8 @@ for pkg in _collect_pkgs:
 
 # 手动补充常见隐藏导入
 hiddenimports += [
+    "asr_engine",
+    "model_manager",
     "funasr.register",
     "funasr.auto.auto_model",
     "funasr.models.fun_asr_nano.checkpoint_utils",
