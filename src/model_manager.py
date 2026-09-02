@@ -37,17 +37,17 @@ class ModelManager:
 
     @classmethod
     def instance(cls, model_root: str = None, device: str = None,
-                 asr_model: str = None) -> "ModelManager":
-        """获取全局单例。首次调用可指定 model_root/device/asr_model。"""
+                 asr_model: str = None, vad_level: str = None) -> "ModelManager":
+        """获取全局单例。首次调用可指定 model_root/device/asr_model/vad_level。"""
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = cls(model_root=model_root, device=device,
-                                        asr_model=asr_model)
+                                        asr_model=asr_model, vad_level=vad_level)
         return cls._instance
 
     def __init__(self, model_root: str = None, device: str = None,
-                 asr_model: str = None):
+                 asr_model: str = None, vad_level: str = None):
         self._lock = threading.Lock()          # 串行化 加载/推理
         self._state_lock = threading.Lock()    # 保护状态字段
         self._engine = None
@@ -61,6 +61,7 @@ class ModelManager:
         self._model_root = model_root
         self._device = device
         self._asr_model = asr_model
+        self._vad_level = vad_level
         # 就绪事件：等待模型就绪的线程在此阻塞
         self._ready_event = threading.Event()
 
@@ -151,6 +152,7 @@ class ModelManager:
                     model_root=self._model_root,
                     device=self._device,
                     asr_model=self._asr_model,
+                    vad_level=self._vad_level,
                 )
                 engine.load_model(progress_callback=progress_callback)
                 self._engine = engine
@@ -190,6 +192,32 @@ class ModelManager:
             self._set_state(self.IDLE)
             self._ready_event.clear()
 
+    def configure(self, model_root: str = None, device: str = None,
+                  asr_model: str = None, vad_level: str = None):
+        """更新配置参数；若与当前引擎配置不同，重置引擎（下次加载生效）。
+
+        用于运行时切换模型/VAD 档位后刷新单例参数。
+        """
+        changed = False
+        if model_root is not None and model_root != self._model_root:
+            self._model_root = model_root
+            changed = True
+        if device is not None and device != self._device:
+            self._device = device
+            changed = True
+        if asr_model is not None and asr_model != self._asr_model:
+            self._asr_model = asr_model
+            changed = True
+        if vad_level is not None and vad_level != self._vad_level:
+            self._vad_level = vad_level
+            changed = True
+        if changed and self._engine is not None:
+            logger.info("配置变更，重置引擎（下次转写/预加载按新配置加载）")
+            self.reset()
+        elif changed:
+            logger.info(f"ModelManager 参数更新: asr_model={self._asr_model}, "
+                        f"vad_level={self._vad_level}")
+
 
 # 模块级便捷引用
 _default_manager = None
@@ -197,13 +225,23 @@ _default_lock = threading.Lock()
 
 
 def get_manager(model_root: str = None, device: str = None,
-                asr_model: str = None) -> ModelManager:
-    """获取全局默认 ModelManager（供主程序使用）。"""
+                asr_model: str = None, vad_level: str = None) -> ModelManager:
+    """获取全局默认 ModelManager（供主程序使用）。
+
+    单例首次创建时用给定参数；已存在时若参数有变则自动 configure 更新。
+    """
     global _default_manager
     if _default_manager is None:
         with _default_lock:
             if _default_manager is None:
                 _default_manager = ModelManager.instance(
                     model_root=model_root, device=device, asr_model=asr_model,
+                    vad_level=vad_level,
                 )
+                return _default_manager
+    # 已存在：同步最新配置（引擎未加载或参数变化时才会真正重置）
+    _default_manager.configure(
+        model_root=model_root, device=device, asr_model=asr_model,
+        vad_level=vad_level,
+    )
     return _default_manager

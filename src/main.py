@@ -159,6 +159,7 @@ DEFAULT_CONFIG = {
     "theme": "dark",
     "model_dir": "mod",           # 模型目录（相对 EXE 或绝对路径）
     "asr_model": "fun-asr-nano",  # 识别模型: fun-asr-nano / sensevoice / paraformer
+    "vad_level": "medium",         # VAD 切句灵敏度: fine / medium / coarse
 }
 
 
@@ -367,18 +368,21 @@ class TranscriptionWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)    # 阶段状态文本
 
-    def __init__(self, audio_path: str, model_dir: str, audio_name: str = "", asr_model: str = None):
+    def __init__(self, audio_path: str, model_dir: str, audio_name: str = "",
+                 asr_model: str = None, vad_level: str = None):
         super().__init__()
         self.audio_path = audio_path
         self.model_dir = model_dir
         self.audio_name = audio_name or Path(audio_path).name
         self.asr_model = asr_model
+        self.vad_level = vad_level
 
     def run(self):
         try:
             from model_manager import get_manager
             # 单例 manager：若后台尚未加载完成则同步等待
-            manager = get_manager(model_root=self.model_dir, asr_model=self.asr_model)
+            manager = get_manager(model_root=self.model_dir, asr_model=self.asr_model,
+                                  vad_level=self.vad_level)
             if not manager.is_ready():
                 self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
             else:
@@ -522,6 +526,21 @@ class ConfigDialog(QDialog):
         self.asr_model_combo.currentIndexChanged.connect(self._on_asr_model_changed)
         form.addRow("", self.asr_model_desc)
 
+        # VAD 切句灵敏度（延迟 import，避免启动卡顿）
+        from asr_engine import VAD_PRESETS, DEFAULT_VAD_LEVEL
+        self.vad_combo = QComboBox()
+        self._vad_keys = list(VAD_PRESETS.keys())
+        for k in self._vad_keys:
+            self.vad_combo.addItem(VAD_PRESETS[k]["label"], k)
+        self.vad_combo.setToolTip(
+            "切句灵敏度：停顿多久算一句话结束。\n"
+            "细：停顿 0.8s 即切（句子多、短促）\n"
+            "中：停顿 1.5s 才切（推荐，会议平衡）\n"
+            "粗：停顿 2.5s 才切（长句完整，可能混说话人）\n"
+            "改后保存即生效（自动重新加载模型）。"
+        )
+        form.addRow("切句灵敏度：", self.vad_combo)
+
         layout.addLayout(form)
 
         tip = QLabel("提示：API Key 仅保存在本地 config.json，不会上传。")
@@ -552,6 +571,10 @@ class ConfigDialog(QDialog):
         idx = self._asr_model_keys.index(cur) if cur in self._asr_model_keys else 0
         self.asr_model_combo.setCurrentIndex(idx)
         self._on_asr_model_changed(idx)
+        # 恢复已保存的切句灵敏度
+        cur_vad = self.config.get("vad_level", "")
+        idx_vad = self._vad_keys.index(cur_vad) if cur_vad in self._vad_keys else 0
+        self.vad_combo.setCurrentIndex(idx_vad)
 
     def _on_accept(self):
         key = self.api_key_edit.text().strip()
@@ -565,8 +588,11 @@ class ConfigDialog(QDialog):
         cur = self.asr_model_combo.currentData()
         if cur:
             self.config.set("asr_model", cur)
+        cur_vad = self.vad_combo.currentData()
+        if cur_vad:
+            self.config.set("vad_level", cur_vad)
         self.config.save()
-        logger.info(f"配置已更新（asr_model={cur}）")
+        logger.info(f"配置已更新（asr_model={cur}, vad_level={cur_vad}）")
         self.accept()
 
 
@@ -633,7 +659,9 @@ class MainWindow(QMainWindow):
 
         try:
             from model_manager import get_manager
-            manager = get_manager(model_root=str(mp), asr_model=sub)
+            vad_level = self.config.get("vad_level", "medium")
+            manager = get_manager(model_root=str(mp), asr_model=sub,
+                                  vad_level=vad_level)
         except Exception as e:
             logger.warning(f"ModelManager 初始化失败，跳过预加载: {e}")
             return
@@ -955,9 +983,11 @@ class MainWindow(QMainWindow):
         self.txt_transcript.setPlainText("转写中，请稍候（首次会加载模型，可能需要一点时间）…")
         model_dir = self.config.get("model_dir", "mod")
         asr_model = self.config.get("asr_model", "fun-asr-nano")
+        vad_level = self.config.get("vad_level", "medium")
         self.transcriber = TranscriptionWorker(
             audio_path=self.current_audio, model_dir=model_dir,
             audio_name=self.current_audio_name, asr_model=asr_model,
+            vad_level=vad_level,
         )
         self.transcriber.progress.connect(self._on_transcribe_progress)
         self.transcriber.finished.connect(self._on_transcribe_finished)
@@ -1051,13 +1081,16 @@ class MainWindow(QMainWindow):
         logger.info("[按钮] 点击「配置」")
         old_model = self.config.get("asr_model", "fun-asr-nano")
         old_dir = self.config.get("model_dir", "mod")
+        old_vad = self.config.get("vad_level", "medium")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
         new_model = self.config.get("asr_model", old_model)
         new_dir = self.config.get("model_dir", old_dir)
-        # 若模型或目录变了：重置 manager 并重新预加载，下次转写用新模型
-        if new_model != old_model or new_dir != old_dir:
-            logger.info(f"模型配置变更（{old_model}->{new_model}），重置并重新预加载")
+        new_vad = self.config.get("vad_level", old_vad)
+        # 若模型/目录/切句档位变了：重置 manager 并重新预加载，下次转写用新配置
+        if new_model != old_model or new_dir != old_dir or new_vad != old_vad:
+            logger.info(f"模型配置变更（{old_model}->{new_model}, vad {old_vad}->{new_vad}），"
+                        f"重置并重新预加载")
             self._restart_preload_after_config()
 
     # ---------- 辅助 ----------

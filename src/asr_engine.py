@@ -108,6 +108,36 @@ ASR_MODELS = {
 DEFAULT_MODEL_ROOT = "mod"
 DEFAULT_ASR_MODEL = MODEL_NANO   # 默认仍用 Nano（有 GPU 目标机）
 
+# ---------------------------------------------------------------------------
+# VAD 切句灵敏度预设（fsmn-vad 的 max_end_silence_time 参数）
+# ---------------------------------------------------------------------------
+# max_end_silence_time: 段尾静音超过该毫秒数才判定说话结束并切段。
+#   值越小切得越碎（每句短），越大越粗（长句/可能混说话人）。
+#   2026-09-02 实测（标准录音 7.mp3，4分45秒）：
+#     800ms -> 105 段（41 段 <1s，过碎）
+#     1500ms -> 29 段（平衡）
+#     2500ms -> 16 段（完整但可能合并不同说话人）
+VAD_LEVEL_FINE = "fine"        # 细：800ms（同模型默认，切句短促）
+VAD_LEVEL_MEDIUM = "medium"    # 中：1500ms（推荐，会议平衡）
+VAD_LEVEL_COARSE = "coarse"    # 粗：2500ms（长句优先）
+
+VAD_PRESETS = {
+    VAD_LEVEL_FINE: {
+        "label": "细（停顿 0.8s 即切句）",
+        "max_end_silence_time": 800,
+    },
+    VAD_LEVEL_MEDIUM: {
+        "label": "中（停顿 1.5s 才切句，推荐）",
+        "max_end_silence_time": 1500,
+    },
+    VAD_LEVEL_COARSE: {
+        "label": "粗（停顿 2.5s 才切句）",
+        "max_end_silence_time": 2500,
+    },
+}
+
+DEFAULT_VAD_LEVEL = VAD_LEVEL_MEDIUM   # 默认中档 1.5s
+
 
 # ---------------------------------------------------------------------------
 # 结构化转写结果
@@ -189,7 +219,7 @@ class ASREngine:
     """
 
     def __init__(self, model_root: str = DEFAULT_MODEL_ROOT, device: str = None,
-                 asr_model: str = None):
+                 asr_model: str = None, vad_level: str = None):
         # 归一化模型根目录为绝对路径
         p = Path(model_root)
         if not p.is_absolute():
@@ -212,11 +242,18 @@ class ASREngine:
             self.asr_model = DEFAULT_ASR_MODEL
         self._model_cfg = ASR_MODELS[self.asr_model]
 
+        # VAD 切句灵敏度（细/中/粗 -> max_end_silence_time）
+        self.vad_level = vad_level or DEFAULT_VAD_LEVEL
+        if self.vad_level not in VAD_PRESETS:
+            logger.warning(f"未知的 VAD 档位 '{self.vad_level}'，回退到 {DEFAULT_VAD_LEVEL}")
+            self.vad_level = DEFAULT_VAD_LEVEL
+        self._vad_preset = VAD_PRESETS[self.vad_level]
+
         self.device = device or self._detect_device()
         self.model = None
         self._loading = False
         logger.info(f"ASREngine 初始化，device={self.device}, model_root={self.model_root}, "
-                    f"asr_model={self.asr_model}")
+                    f"asr_model={self.asr_model}, vad_level={self.vad_level}")
 
     # ---- 路径解析 ----
     def _sub(self, name: str) -> str:
@@ -297,11 +334,15 @@ class ASREngine:
             os.chdir(asr_dir)
 
             # 通用加载参数：本地主模型 + VAD + 说话人（+ Paraformer 用 ct-punc）
+            # vad_kwargs: max_single_segment_time 防超长段（>30s 硬切，
+            #   避免单段过长；max_end_silence_time 按用户选的灵敏度档位）
+            vad_kwargs = {"max_single_segment_time": 30000,
+                          "max_end_silence_time": self._vad_preset["max_end_silence_time"]}
             load_kwargs = dict(
                 model=asr_dir,                  # 本地主模型路径
                 trust_remote_code=True,
                 vad_model=self._sub(SUB_VAD),   # 本地 VAD
-                vad_kwargs={"max_single_segment_time": 30000},
+                vad_kwargs=vad_kwargs,
                 spk_model=self._sub(SUB_SPK),   # 本地说话人嵌入（cam++）
                 device=self.device,
                 disable_update=True,            # 关闭版本检查，避免联网
