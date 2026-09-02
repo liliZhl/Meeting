@@ -356,8 +356,13 @@ class AudioRecorder(QThread):
 # ---------------------------------------------------------------------------
 
 class TranscriptionWorker(QThread):
-    """语音转写（含说话人分离）。"""
-    finished = pyqtSignal(str)
+    """语音转写（含说话人分离）。
+
+    模型由 ModelManager 单例常驻管理（启动时后台预加载），
+    转写时直接复用，不再每次新建引擎重新加载。
+    """
+    finished = pyqtSignal(str)          # 纯文本转写结果（兼容当前 UI）
+    finished_obj = pyqtSignal(object)   # 结构化结果 TranscriptionResult
     error = pyqtSignal(str)
     progress = pyqtSignal(str)    # 阶段状态文本
 
@@ -369,14 +374,21 @@ class TranscriptionWorker(QThread):
 
     def run(self):
         try:
-            # 延迟导入，避免启动慢
-            from asr_engine import ASREngine
-            self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
-            engine = ASREngine(model_root=self.model_dir)
-            engine.load_model(progress_callback=self._on_progress)
+            from model_manager import get_manager
+            # 单例 manager：若后台尚未加载完成则同步等待
+            manager = get_manager(model_root=self.model_dir)
+            if not manager.is_ready():
+                self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
+            else:
+                self.progress.emit("模型已就绪，开始转写…")
             self.progress.emit(f"正在转写「{self.audio_name}」（音频较长时可能需要几分钟）…")
-            text = engine.transcribe(self.audio_path, progress_callback=self._on_progress)
+            result = manager.transcribe(
+                self.audio_path, progress_callback=self._on_progress,
+            )
             logger.info("转写完成")
+            # 结构化结果与纯文本同时发出，UI 按需取用
+            self.finished_obj.emit(result)
+            text = result.to_text() if hasattr(result, "to_text") else str(result)
             self.finished.emit(text or "(无转写结果)")
         except Exception as e:
             logger.exception("转写失败")
@@ -527,6 +539,18 @@ class ConfigDialog(QDialog):
 # 10. 主窗口
 # ---------------------------------------------------------------------------
 
+class _PreloadSignal(QObject):
+    """后台预加载线程 -> UI 主线程的信号桥。"""
+    progress = pyqtSignal(str, str)          # (step, detail)
+    state_changed = pyqtSignal(str, str)     # (state, error)
+
+    def emit_progress(self, step: str, detail: str = ""):
+        self.progress.emit(step, detail)
+
+    def emit_state(self, state: str, error: str = ""):
+        self.state_changed.emit(state, error)
+
+
 class MainWindow(QMainWindow):
     """应用主窗口。"""
 
@@ -541,10 +565,79 @@ class MainWindow(QMainWindow):
         self.summarizer = None
         self.recording_timer = None
         self.record_start_time = 0.0
+        self._model_manager = None
+        self._preload_sig = None
+        self._preload_poll_timer = None
 
         self._build_ui()
         self._apply_theme()
         self._check_first_run()
+        self._start_model_preload()
+
+    # ---------- 启动预加载模型 ----------
+    def _start_model_preload(self):
+        """启动后后台预加载 ASR 模型，转写时零等待。
+
+        仅当模型目录就绪时预加载；否则保持 idle，等转写时再处理。
+        进度通过定时轮询状态更新到状态栏（后台线程不能直接碰 UI）。
+        """
+        model_dir = self.config.get("model_dir", "mod")
+        mp = Path(model_dir)
+        if not mp.is_absolute():
+            mp = APP_DIR / model_dir
+        if not (mp / "fun-asr-nano" / "model.pt").exists():
+            logger.warning("模型目录未就绪，跳过启动预加载")
+            return
+
+        try:
+            from model_manager import get_manager
+            manager = get_manager(model_root=str(mp))
+        except Exception as e:
+            logger.warning(f"ModelManager 初始化失败，跳过预加载: {e}")
+            return
+
+        self._model_manager = manager
+        self.lbl_status.setText("正在后台加载模型（可先进行其他操作）…")
+
+        # 进度回调：后台线程 -> 信号 -> 主线程
+        if self._preload_sig is None:
+            self._preload_sig = _PreloadSignal()
+            self._preload_sig.progress.connect(self._on_preload_progress)
+            self._preload_sig.state_changed.connect(self._on_preload_state)
+
+        manager.load_async(progress_callback=self._preload_sig.emit_progress)
+
+        # 主线程 QTimer 轮询状态，后台加载完成/失败时刷新状态栏
+        from PyQt6.QtCore import QTimer
+        self._preload_poll_count = 0
+        def _poll():
+            if manager is None:
+                return
+            st = manager.state
+            if st in ("ready", "failed"):
+                self._on_preload_state(st, manager.error)
+                self._preload_poll_timer.stop()
+            else:
+                self._preload_poll_count += 1
+                if self._preload_poll_count % 4 == 0:  # ~每 2s 刷新一次提示
+                    self._on_preload_state(st)
+        self._preload_poll_timer = QTimer(self)
+        self._preload_poll_timer.timeout.connect(_poll)
+        self._preload_poll_timer.start(500)
+
+    def _on_preload_progress(self, step: str, detail: str = ""):
+        text = f"{step}：{detail}" if detail else step
+        logger.debug(f"预加载进度: {text}")
+        self.lbl_status.setText(f"⏳ {text}")
+
+    def _on_preload_state(self, state: str, error: str = ""):
+        logger.info(f"预加载状态: {state}")
+        if state == "ready":
+            self.lbl_status.setText("✅ 模型已就绪，可直接转写")
+        elif state == "failed":
+            self.lbl_status.setText(f"⚠️ 模型加载失败（转写时会重试）: {error[:60]}")
+        elif state == "loading":
+            self.lbl_status.setText("正在后台加载模型（可先进行其他操作）…")
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
