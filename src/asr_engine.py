@@ -251,6 +251,14 @@ class ASREngine:
             batch_size=1,
             language="中文",
             itn=True,
+            # 抑制 LLM 解码重复幻觉（"幺幺幺…""包子包子…"）——2026-09-02 实测
+            # 默认解码在口音/噪声段会陷入重复 token 死循环直到 max_new_tokens；
+            # llm_kwargs 透传到 HF generate：repetition_penalty 对已生成 token 降权，
+            # no_repeat_ngram_size 禁止 3-gram 重复。A/B 实测可消除长重复且识别更准。
+            llm_kwargs={
+                "repetition_penalty": 1.15,
+                "no_repeat_ngram_size": 3,
+            },
         )
 
         result = self._parse_result(res)
