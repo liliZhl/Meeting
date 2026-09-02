@@ -73,6 +73,18 @@ hiddenimports += [
     "llvmlite.binding",
 ]
 
+# ── 加速优化：过滤 collect_all/collect_submodules 引入的测试类模块 ──
+# 实测 6634 个 hiddenimports 中 1228 个(19%)是 tests/test_* 子模块，
+# 运行时根本不会被 import，却让分析阶段逐行扫描拖慢打包。
+# numba(55%)/sklearn(45%)/scipy(35%)/numpy(30%) 是重灾区。
+def _is_test_module(mod: str) -> bool:
+    segs = mod.split(".")
+    return any(s in ("tests", "test") or s.startswith("test_") or s.endswith("_test") for s in segs)
+
+_before = len(hiddenimports)
+hiddenimports = [m for m in hiddenimports if not _is_test_module(m)]
+print(f"[spec] 过滤测试模块: {_before} -> {len(hiddenimports)} (省 {_before - len(hiddenimports)})")
+
 # torch 动态库（CUDA 相关）
 try:
     torch_bins = collect_dynamic_libs("torch")
@@ -81,13 +93,7 @@ try:
 except Exception as e:
     print(f"[spec] collect_dynamic_libs('torch') FAILED: {e}")
 
-# scipy / numpy 子模块
-try:
-    hiddenimports += collect_submodules("scipy")
-    hiddenimports += collect_submodules("sklearn")
-except Exception as e:
-    print(f"[spec] collect_submodules FAILED: {e}")
-
+# scipy / numpy 子模块（不再用 collect_submodules 全量收集——上面 collect_all 已含）
 # 去重
 hiddenimports = list(dict.fromkeys(hiddenimports))
 binaries = list({b[0]: b for b in binaries}.values())

@@ -37,3 +37,5 @@ config.json
 .idea/
 .vscode/
 *.swp
+collect_stats.py
+build_log_fast.txt
