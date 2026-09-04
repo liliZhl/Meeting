@@ -113,12 +113,26 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QTextEdit, QLabel, QFileDialog, QMessageBox, QDialog,
         QLineEdit, QComboBox, QDialogButtonBox, QProgressDialog, QFrame, QStatusBar,
-        QProgressBar, QFormLayout, QPlainTextEdit, QSplitter,
+        QProgressBar, QFormLayout, QPlainTextEdit, QTextBrowser, QSplitter,
         QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog, QMenu,
+        QSlider,
     )
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent
-    from PyQt6.QtGui import QFont, QTextCursor, QCloseEvent
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent, QUrl
+    from PyQt6.QtGui import QFont, QTextCursor, QCloseEvent, QTextCharFormat, QColor
     PYQT_OK = True
+
+    # 播放功能依赖 QtMultimedia（阶段 C）
+    try:
+        # Windows 上用 windows 媒体后端（WMF/DirectSound）：默认 ffmpeg 后端在
+        # 远程桌面/无独显会话下枚举 MFT 时会崩（h264_mf/hevc_mf）；仅当用户
+        # 显式设置了 QT_MEDIA_BACKEND 时不覆盖。
+        if os.name == "nt" and not os.environ.get("QT_MEDIA_BACKEND"):
+            os.environ["QT_MEDIA_BACKEND"] = "windows"
+        from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput  # noqa: F401
+        QT_MULTIMEDIA_OK = True
+    except Exception:
+        QT_MULTIMEDIA_OK = False
+        logger.warning("QtMultimedia 不可用，播放功能将隐藏")
 except ImportError as e:
     PYQT_OK = False
     logger.critical(f"PyQt6 导入失败：{e}")
@@ -635,10 +649,29 @@ class MainWindow(QMainWindow):
         self._preload_sig = None
         self._preload_poll_timer = None
 
+        # ---- 阶段 C：播放器状态 ----
+        self.player = None
+        self._play_source_path = ""   # 当前播放源（记录音频 wav）
+        self._play_highlighter_timer = None
+        self._play_current_idx = -1    # 当前播放到的句子索引
+        self._sentences_meta = []      # 当前渲染的句子元数据 [{start_ms,end_ms,start_html_idx}...]
+        self._sentences_start_pos = []  # 每句在 QTextBrowser 文档中的 char 位置（用于高亮）
+        if QT_MULTIMEDIA_OK:
+            try:
+                from player import AudioPlayer
+                self.player = AudioPlayer(self)
+                self.player.positionChanged.connect(self._on_play_position)
+                self.player.durationChanged.connect(self._on_play_duration)
+                self.player.stateChanged.connect(self._on_play_state)
+            except Exception as e:
+                logger.warning(f"播放器初始化失败: {e}")
+                self.player = None
+
         # 历史记录存储（阶段 B）
+        # 注意：RecordStore 根目录传 APP_DIR，内部会自动拼 records/ 子目录
         try:
             from store import RecordStore
-            self.store = RecordStore(str(RECORDS_DIR))
+            self.store = RecordStore(str(APP_DIR))
             # 防御性：扫描旧 recordings/*.wav 转成记录（幂等，迁移后不删源）
             legacy_dir = APP_DIR / "recordings"
             if legacy_dir.exists():
@@ -848,10 +881,12 @@ class MainWindow(QMainWindow):
         self.btn_transcribe.setObjectName("btnTranscribe")
         th.addWidget(self.btn_transcribe)
         tl.addLayout(th)
-        self.txt_transcript = QPlainTextEdit()
+        self.txt_transcript = QTextBrowser()
         self.txt_transcript.setObjectName("txtTranscript")
-        self.txt_transcript.setReadOnly(True)
+        self.txt_transcript.setOpenLinks(False)  # 捕获链接点击自己做跳转
         self.txt_transcript.setPlaceholderText("转写结果将显示在这里（带时间戳和说话人标签）…")
+        # 阶段 C：点击句子时间戳链接 -> 跳转播放
+        self.txt_transcript.anchorClicked.connect(self._on_ts_link_clicked)
         tl.addWidget(self.txt_transcript)
 
         # 纪要区
@@ -919,6 +954,44 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(right_wrap)
         self.main_splitter.setSizes([210, 890])
         root.addWidget(self.main_splitter, stretch=1)
+
+        # ---- 阶段 C：底部播放条 ----
+        if QT_MULTIMEDIA_OK:
+            play_bar = QWidget()
+            play_bar.setObjectName("playBar")
+            pbl = QHBoxLayout(play_bar)
+            pbl.setContentsMargins(4, 2, 4, 2)
+            pbl.setSpacing(6)
+            self.btn_play = QPushButton("▶ 播放")
+            self.btn_play.setObjectName("btnPlay")
+            self.btn_play.setEnabled(False)
+            self.btn_play.setToolTip("播放当前音频（点击转写中的时间戳可跳转）")
+            self.btn_play.clicked.connect(self._on_play_clicked)
+            pbl.addWidget(self.btn_play)
+            self.btn_play_stop = QPushButton("⏹")
+            self.btn_play_stop.setObjectName("btnPlayStop")
+            self.btn_play_stop.setEnabled(False)
+            self.btn_play_stop.setToolTip("停止播放")
+            self.btn_play_stop.clicked.connect(self._on_play_stop_clicked)
+            pbl.addWidget(self.btn_play_stop)
+            self.slider_pos = QSlider(Qt.Orientation.Horizontal)
+            self.slider_pos.setObjectName("sliderPos")
+            self.slider_pos.setEnabled(False)
+            self.slider_pos.setRange(0, 0)
+            self.slider_pos.setToolTip("拖动跳转播放位置")
+            self.slider_pos.sliderMoved.connect(self._on_slider_moved)
+            pbl.addWidget(self.slider_pos, stretch=1)
+            self.lbl_play_time = QLabel("00:00 / 00:00")
+            self.lbl_play_time.setObjectName("lblPlayTime")
+            self.lbl_play_time.setMinimumWidth(140)
+            pbl.addWidget(self.lbl_play_time)
+            root.addWidget(play_bar)
+        else:
+            # QtMultimedia 不可用时隐藏播放条（仍保留 btn_play 引用避免异常）
+            self.btn_play = None
+            self.btn_play_stop = None
+            self.slider_pos = None
+            self.lbl_play_time = None
 
         # 进度条
         self.progress = QProgressBar()
@@ -1065,22 +1138,37 @@ class MainWindow(QMainWindow):
                 from asr_engine import TranscriptionResult
                 tr = TranscriptionResult.from_dict(data)
                 self.current_transcript = tr.to_text()
-                self.txt_transcript.setPlainText(f"【{self.current_audio_name}】\n" + self.current_transcript)
+                # 阶段 C：结构化渲染为句子列表（时间戳可点）
+                header = f"{self.current_audio_name}" if self.current_audio_name else ""
+                self._render_sentences(tr, header)
                 self._current_result_obj = tr
             except Exception as e:
                 logger.warning(f"转写解析失败: {e}")
-                self.txt_transcript.setPlainText("(该记录暂无可用转写内容)")
+                self._update_sentences_plain("(该记录暂无可用转写内容)")
                 self.current_transcript = ""
                 self._current_result_obj = None
         else:
             self.current_transcript = ""
             self._current_result_obj = None
+            self._sentences_meta = []
             self.txt_transcript.setPlainText("该记录尚未转写。\n点击「🔊 开始转写」进行语音转写。")
         summary = self.store.load_summary(rid)
         if summary:
             self.txt_summary.setPlainText(summary)
         else:
             self.txt_summary.setPlainText("该记录尚未生成纪要。\n点击「✨ 生成纪要」调用 AI 总结。")
+        # 阶段 C：有音频则可播放
+        self._reset_play_ui()
+        ap = self.store.audio_path(rid)
+        if Path(ap).exists():
+            if self.btn_play is not None:
+                self.btn_play.setEnabled(True)
+                self.btn_play_stop.setEnabled(True)
+            self._play_source_path = ""  # 强制下次 set_source
+        else:
+            if self.btn_play is not None:
+                self.btn_play.setEnabled(False)
+                self.btn_play_stop.setEnabled(False)
         st = {"summarized": "✅ 已总结", "transcribed": "📝 已转写，可补做纪要",
               "pending": "🎙️ 待转写"}.get(rec.get("status", "pending"), "")
         self.lbl_status.setText(f"已打开记录：{rec.get('title', rid)}（{st}）")
@@ -1134,10 +1222,267 @@ class MainWindow(QMainWindow):
         self.current_audio_name = ""
         self.current_transcript = ""
         self._current_result_obj = None
+        self._sentences_meta = []
+        self._sentences_start_pos = []
+        self._play_current_idx = -1
+        self._stop_playback()
         self.lbl_audio.setText("音频文件：无")
         self.lbl_duration.setText("时长：--")
         self.txt_transcript.clear()
         self.txt_summary.clear()
+
+    # ========== 阶段 C：转写渲染 + 播放 ==========
+
+    def _render_sentences(self, result, header: str = ""):
+        """把结构化转写结果渲染为 QTextBrowser 富文本（句子列表）。
+
+        每句格式：可点击时间戳 + 说话人 + 文本。
+        链接 href 形如 jump:<start_ms>，点击后 seek 播放。
+        """
+        import html as _html
+        meta = []
+        html_parts = []
+        if header:
+            html_parts.append(
+                "<div style='font-weight:bold; color:#7aa2f7;'>" + _html.escape(header) + "</div>"
+            )
+        sentences = result.sentences if result else []
+        for i, s in enumerate(sentences):
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            start_ms = int(s.get("start_ms") or 0)
+            end_ms = int(s.get("end_ms") or 0)
+            spk = s.get("speaker")
+            if spk is not None and result and result.speakers:
+                name = result.speakers.get(spk, f"说话人{spk}")
+            elif spk is not None:
+                name = f"说话人{spk}"
+            else:
+                name = ""
+            ts_html = self._fmt_ts_html(start_ms, end_ms, start_ms)
+            spk_html = f"<span style='color:#9ece6a;'>{_html.escape(name)}</span> " if name else ""
+            meta.append({"start_ms": start_ms, "end_ms": end_ms, "idx": i})
+            html_parts.append(
+                f"<div style='margin-bottom:4px;'>{ts_html} {spk_html}"
+                f"<span style='color:#c0caf5;'>{_html.escape(text)}</span></div>"
+            )
+        self._sentences_meta = meta
+        if html_parts:
+            self.txt_transcript.setHtml("".join(html_parts))
+        else:
+            self.txt_transcript.setPlainText("(无转写结果)")
+
+    def _fmt_ts_html(self, start_ms: int, end_ms: int, jump_ms: int) -> str:
+        """时间戳 -> 可点击 HTML。"""
+        s = start_ms / 1000.0
+        e = end_ms / 1000.0
+        h1, m1, s1 = int(s // 3600), int(s % 3600 // 60), int(s % 60)
+        h2, m2, s2 = int(e // 3600), int(e % 3600 // 60), int(e % 60)
+        t1 = f"{h1:02d}:{m1:02d}:{s1:02d}"
+        t2 = f"{h2:02d}:{m2:02d}:{s2:02d}"
+        return (
+            f"<a href='jump:{int(jump_ms)}' style='color:#7aa2f7; "
+            f"text-decoration:none;'>[{t1}-{t2}]</a>"
+        )
+
+    def _update_sentences_plain(self, text: str, header: str = ""):
+        """无结构化结果时显示纯文本（兼容旧数据/错误信息）。"""
+        self._sentences_meta = []
+        if header:
+            text = header + "\n" + text
+        self.txt_transcript.setPlainText(text)
+
+    def _on_ts_link_clicked(self, url: QUrl):
+        """点击句子时间戳 -> 跳转播放。"""
+        href = url.toString()
+        logger.info(f"点击时间戳链接: {href}")
+        if not href.startswith("jump:"):
+            return
+        try:
+            ms = int(href.split(":", 1)[1])
+        except Exception:
+            return
+        self._seek_play(ms)
+
+    def _ensure_play_source(self) -> bool:
+        """确保播放源已设置（当前记录/音频的 wav）。
+        返回 True 表示可播放。
+        """
+        if self.player is None:
+            return False
+        # 优先：当前历史记录的 audio.wav（与转写对齐）
+        src = ""
+        if self.current_record_id and self.store is not None:
+            ap = self.store.audio_path(self.current_record_id)
+            if Path(ap).exists():
+                src = str(ap)
+        if not src and self.current_audio and Path(self.current_audio).exists():
+            src = self.current_audio
+        if not src:
+            return False
+        if src != self._play_source_path:
+            if not self.player.set_source(src):
+                return False
+            self._play_source_path = src
+            # 新音源时重置进度条
+            if self.slider_pos is not None:
+                self.slider_pos.setRange(0, 0)
+                self.slider_pos.setValue(0)
+            self.lbl_play_time.setText("00:00 / 00:00")
+        return True
+
+    def _seek_play(self, ms: int):
+        """跳转到指定位置播放。"""
+        if self.player is None or not self._ensure_play_source():
+            self.lbl_status.setText("当前没有可播放的音频")
+            return
+        self.player.seek(ms)
+        self.player.play()
+        self.lbl_status.setText(f"正在播放：{self.current_audio_name or '当前音频'}（{ms // 1000} 秒处）")
+        self._start_highlight_timer()
+
+    def _on_play_clicked(self):
+        logger.info("[按钮] 点击「播放」")
+        if self.player is None:
+            return
+        if not self._ensure_play_source():
+            self.lbl_status.setText("当前没有可播放的音频（请先录音/导入并归档）")
+            return
+        if self.player.is_playing():
+            self.player.pause()
+            self.btn_play.setText("▶ 播放")
+        else:
+            self.player.play()
+            self.btn_play.setText("⏸ 暂停")
+            self._start_highlight_timer()
+
+    def _on_play_stop_clicked(self):
+        self._stop_playback()
+
+    def _stop_playback(self):
+        if self.player is not None:
+            self.player.stop()
+        if self.btn_play is not None:
+            self.btn_play.setText("▶ 播放")
+        if self.slider_pos is not None:
+            self.slider_pos.setValue(0)
+        self._play_current_idx = -1
+        self._stop_highlight_timer()
+        self._clear_highlight()
+
+    def _on_slider_moved(self, pos: int):
+        """拖动进度条 -> 跳转。"""
+        if self.player is not None:
+            self.player.seek(pos)
+
+    def _on_play_position(self, ms: int):
+        if self.slider_pos is not None:
+            self.slider_pos.setValue(int(ms))
+        # 更新时间显示
+        if self.lbl_play_time is not None:
+            d = self.player.duration() if self.player else 0
+            self.lbl_play_time.setText(
+                f"{format_timestamp(ms / 1000)} / {format_timestamp(d / 1000)}"
+            )
+        # 播放高亮：找当前句
+        self._highlight_current_sentence(int(ms))
+
+    def _on_play_duration(self, ms: int):
+        if self.slider_pos is not None:
+            self.slider_pos.setRange(0, int(ms))
+        if self.lbl_play_time is not None:
+            self.lbl_play_time.setText(
+                f"{format_timestamp(self.player.position() / 1000)} / {format_timestamp(ms / 1000)}"
+            )
+
+    def _on_play_state(self, state: str):
+        if state == "playing":
+            self.btn_play.setText("⏸ 暂停")
+        else:
+            self.btn_play.setText("▶ 播放")
+            if state == "stopped":
+                if self.slider_pos is not None:
+                    self.slider_pos.setValue(0)
+                self._play_current_idx = -1
+                self._clear_highlight()
+
+    # ---------- 播放高亮 ----------
+    def _start_highlight_timer(self):
+        if self._play_highlighter_timer is None:
+            self._play_highlighter_timer = QTimer(self)
+            self._play_highlighter_timer.setInterval(300)
+            self._play_highlighter_timer.timeout.connect(
+                lambda: self._highlight_current_sentence(
+                    self.player.position() if self.player else 0)
+            )
+        self._play_highlighter_timer.start()
+
+    def _stop_highlight_timer(self):
+        if self._play_highlighter_timer is not None:
+            self._play_highlighter_timer.stop()
+
+    def _highlight_current_sentence(self, pos_ms: int):
+        """根据播放位置高亮当前句（找到则整句加底色）。"""
+        meta = self._sentences_meta
+        if not meta or self.txt_transcript is None:
+            return
+        idx = -1
+        for i, m in enumerate(meta):
+            if m["start_ms"] <= pos_ms < (m["end_ms"] if m["end_ms"] > m["start_ms"] else m["start_ms"] + 1):
+                idx = i
+                break
+        if idx == self._play_current_idx:
+            return
+        self._play_current_idx = idx
+        if idx < 0:
+            self._clear_highlight()
+            return
+        # 高亮第 idx 句：QTextBrowser 无直接按 block 高亮富文本的简单方式，
+        # 用 QTextCursor 查找句子起始文本近似高亮：简单方案——用 extraSelections 只能选连续区域。
+        # 由于 QTextBrowser HTML 不便逐句定位，改为滚动到该句 + 用 find 定位起始时间戳文本。
+        self._scroll_to_sentence(idx)
+
+    def _scroll_to_sentence(self, idx: int):
+        """滚动视图使第 idx 句可见（以时间戳文本定位）。"""
+        m = self._sentences_meta[idx]
+        start_ms = m["start_ms"]
+        hh, mm, ss = start_ms // 3600000, (start_ms % 3600000) // 60000, (start_ms % 60000) // 1000
+        anchor = f"{hh:02d}:{mm:02d}:{ss:02d}"
+        cur = self.txt_transcript.textCursor()
+        # 用文档查找定位
+        doc = self.txt_transcript.document()
+        c = doc.find(anchor)
+        if not c.isNull():
+            self.txt_transcript.setTextCursor(c)
+            self.txt_transcript.ensureCursorVisible()
+        # 辅助高亮：把整行选中显示（简单视觉反馈）
+        if not c.isNull():
+            cur = self.txt_transcript.textCursor()
+            cur.setPosition(c.selectionStart())
+            cur.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+            self.txt_transcript.setTextCursor(cur)
+
+    def _clear_highlight(self):
+        if self.txt_transcript is not None:
+            cur = self.txt_transcript.textCursor()
+            cur.clearSelection()
+            self.txt_transcript.setTextCursor(cur)
+
+    def _reset_play_ui(self):
+        """切换到新记录/新音频时重置播放条状态。"""
+        if self.player is not None:
+            self.player.stop()
+        self._play_source_path = ""
+        self._play_current_idx = -1
+        self._stop_highlight_timer()
+        if self.slider_pos is not None:
+            self.slider_pos.setRange(0, 0)
+            self.slider_pos.setValue(0)
+        if self.lbl_play_time is not None:
+            self.lbl_play_time.setText("00:00 / 00:00")
+        if self.btn_play is not None:
+            self.btn_play.setText("▶ 播放")
 
     def _on_hist_new(self):
         """把当前音频手动归档为新记录（未走录音/导入自动建档的场合）。"""
@@ -1208,6 +1553,11 @@ class MainWindow(QMainWindow):
             item = self._find_hist_item(rid)
             if item:
                 self.hist_list.setCurrentItem(item)
+            # 阶段 C：新记录有音频 -> 启用播放条
+            self._reset_play_ui()
+            if self.btn_play is not None:
+                self.btn_play.setEnabled(True)
+                self.btn_play_stop.setEnabled(True)
             logger.info(f"自动归档记录: {rid} source={source} dur={dur:.1f}s")
         except Exception as e:
             logger.error(f"自动归档失败: {e}")
@@ -1337,12 +1687,16 @@ class MainWindow(QMainWindow):
     def _on_transcribe_finished(self, transcript):
         logger.info("转写完成回调")
         self.current_transcript = transcript
-        header = f"【{self.current_audio_name}】\n" if self.current_audio_name else ""
-        self.txt_transcript.setPlainText(header + transcript)
+        header = f"{self.current_audio_name}" if self.current_audio_name else ""
+        # 阶段 C：优先用结构化结果渲染句子列表（时间戳可点）
+        result_obj = getattr(self, "_pending_result_obj", None)
+        if result_obj is not None:
+            self._render_sentences(result_obj, header)
+        else:
+            self._update_sentences_plain(transcript, f"【{header}】" if header else "")
         self._set_busy(False)
         self.lbl_status.setText(f"转写完成：{self.current_audio_name}")
         # 阶段 B：结构化结果存入当前记录
-        result_obj = getattr(self, "_pending_result_obj", None)
         if result_obj is not None and self.current_record_id and self.store is not None:
             try:
                 self.store.save_transcript(self.current_record_id, result_obj)
@@ -1352,6 +1706,14 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error(f"转写存记录失败: {e}")
         self._pending_result_obj = None
+        # 阶段 C：转写后启用播放按钮（若当前记录有音频）
+        if self.current_record_id and self.store is not None:
+            ap = self.store.audio_path(self.current_record_id)
+            if Path(ap).exists():
+                self._play_source_path = ""
+                if self.btn_play is not None:
+                    self.btn_play.setEnabled(True)
+                    self.btn_play_stop.setEnabled(True)
 
     def _on_transcribe_finished_obj(self, result):
         """结构化转写结果（阶段 B：暂存，等 finished 文本回调后统一存）。"""
@@ -1482,6 +1844,14 @@ class MainWindow(QMainWindow):
                 QPlainTextEdit { background-color: #252526; color: #d4d4d4;
                     border: 1px solid #3c3c3c; border-radius: 4px;
                     font-family: 'Consolas','Microsoft YaHei'; font-size: 12px; }
+                QTextBrowser { background-color: #252526; color: #d4d4d4;
+                    border: 1px solid #3c3c3c; border-radius: 4px;
+                    font-family: 'Consolas','Microsoft YaHei'; font-size: 13px; }
+                QSlider::groove:horizontal { height: 6px; background: #3a3a3a;
+                    border-radius: 3px; }
+                QSlider::handle:horizontal { width: 14px; margin: -5px 0;
+                    background: #007acc; border-radius: 7px; }
+                QSlider::sub-page:horizontal { background: #007acc; border-radius: 3px; }
                 QLabel { color: #e0e0e0; }
                 QLineEdit { background-color: #2d2d2d; color: #e0e0e0;
                     border: 1px solid #444; border-radius: 4px; padding: 4px; }
@@ -1497,6 +1867,13 @@ class MainWindow(QMainWindow):
         if self.recorder is not None and self.recorder.isRunning():
             self.recorder.stop()
             self.recorder.wait(2000)
+        # 阶段 C：释放播放器
+        try:
+            if self.player is not None:
+                self._stop_highlight_timer()
+                self.player.release()
+        except Exception as e:
+            logger.warning(f"释放播放器失败: {e}")
         logger.info("应用已退出")
         event.accept()
 
