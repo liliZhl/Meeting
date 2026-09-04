@@ -105,6 +105,26 @@ logger = setup_logging()
 
 
 # ---------------------------------------------------------------------------
+# 1.5 主题（阶段 E：样式集中在 theme.py，此处仅取配色常量）
+# ---------------------------------------------------------------------------
+try:
+    from theme import build_qss, get_colors
+    THEME_OK = True
+except Exception as _e:                                    # pragma: no cover
+    THEME_OK = False
+    logger.warning(f"theme.py 加载失败，将使用内置兜底配色: {_e}")
+
+    def build_qss(mode: str = "dark") -> str:               # type: ignore
+        return ""
+
+    def get_colors(mode: str = "dark") -> dict:             # type: ignore
+        return {
+            "ts": "#7aa2f7", "spk": "#9ece6a", "body": "#c0caf5",
+            "highlight": "255,200,60,70", "success": "#9ece6a", "accent": "#7aa2f7",
+        }
+
+
+# ---------------------------------------------------------------------------
 # 2. 依赖导入（优雅降级：缺失时记录警告，界面仍可启动）
 # ---------------------------------------------------------------------------
 
@@ -538,7 +558,7 @@ class ConfigDialog(QDialog):
 
         # 模型说明（随选择更新）
         self.asr_model_desc = QLabel()
-        self.asr_model_desc.setStyleSheet("color: gray; font-size: 11px;")
+        self.asr_model_desc.setObjectName("asrModelDesc")   # 样式见 theme.py
         self.asr_model_desc.setWordWrap(True)
         self.asr_model_combo.currentIndexChanged.connect(self._on_asr_model_changed)
         form.addRow("", self.asr_model_desc)
@@ -558,10 +578,17 @@ class ConfigDialog(QDialog):
         )
         form.addRow("切句灵敏度：", self.vad_combo)
 
+        # 界面主题（阶段 E：深色蓝紫 / 浅色）
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("深色（蓝紫）", "dark")
+        self.theme_combo.addItem("浅色", "light")
+        self.theme_combo.setToolTip("切换后立即生效。")
+        form.addRow("界面主题：", self.theme_combo)
+
         layout.addLayout(form)
 
         tip = QLabel("提示：API Key 仅保存在本地 config.json，不会上传。")
-        tip.setStyleSheet("color: gray;")
+        tip.setObjectName("tipLabel")                       # 样式见 theme.py
         layout.addWidget(tip)
 
         buttons = QDialogButtonBox(
@@ -592,6 +619,9 @@ class ConfigDialog(QDialog):
         cur_vad = self.config.get("vad_level", "")
         idx_vad = self._vad_keys.index(cur_vad) if cur_vad in self._vad_keys else 0
         self.vad_combo.setCurrentIndex(idx_vad)
+        # 恢复主题选择
+        idx_theme = self.theme_combo.findData(self.config.get("theme", "dark"))
+        self.theme_combo.setCurrentIndex(idx_theme if idx_theme >= 0 else 0)
 
     def _on_accept(self):
         key = self.api_key_edit.text().strip()
@@ -608,8 +638,11 @@ class ConfigDialog(QDialog):
         cur_vad = self.vad_combo.currentData()
         if cur_vad:
             self.config.set("vad_level", cur_vad)
+        cur_theme = self.theme_combo.currentData()
+        if cur_theme:
+            self.config.set("theme", cur_theme)
         self.config.save()
-        logger.info(f"配置已更新（asr_model={cur}, vad_level={cur_vad}）")
+        logger.info(f"配置已更新（asr_model={cur}, vad_level={cur_vad}, theme={cur_theme}）")
         self.accept()
 
 
@@ -649,6 +682,8 @@ class MainWindow(QMainWindow):
         self._model_manager = None
         self._preload_sig = None
         self._preload_poll_timer = None
+        # 阶段 E：当前主题配色（富文本/高亮用），由 _apply_theme 更新
+        self._palette = get_colors(self.config.get("theme", "dark"))
 
         # ---- 阶段 C：播放器状态 ----
         self.player = None
@@ -928,11 +963,10 @@ class MainWindow(QMainWindow):
         hist_panel.setMinimumWidth(190)
         hist_panel.setMaximumWidth(320)
         hl = QVBoxLayout(hist_panel)
-        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setContentsMargins(6, 6, 6, 6)
         hl.setSpacing(4)
         hist_title = QLabel("🗂 历史记录")
         hist_title.setObjectName("histTitle")
-        hist_title.setStyleSheet("font-weight: bold; padding: 2px;")
         hl.addWidget(hist_title)
         self.hist_list = QListWidget()
         self.hist_list.setObjectName("histList")
@@ -1244,11 +1278,13 @@ class MainWindow(QMainWindow):
         链接 href 形如 jump:<start_ms>，点击后 seek 播放。
         """
         import html as _html
+        pal = getattr(self, "_palette", None) or get_colors("dark")
         meta = []
         html_parts = []
         if header:
             html_parts.append(
-                "<div style='font-weight:bold; color:#7aa2f7;'>" + _html.escape(header) + "</div>"
+                f"<div style='font-weight:bold; color:{pal['accent']};'>"
+                + _html.escape(header) + "</div>"
             )
         sentences = result.sentences if result else []
         for i, s in enumerate(sentences):
@@ -1267,13 +1303,13 @@ class MainWindow(QMainWindow):
             ts_html = self._fmt_ts_html(start_ms, end_ms, start_ms)
             # 阶段 D：说话人标签可点击（href = spk:<编号>），点击弹菜单改名/合并
             spk_html = (
-                f"<a href='spk:{spk}' style='color:#9ece6a; text-decoration:none;' "
+                f"<a href='spk:{spk}' style='color:{pal['spk']}; text-decoration:none;' "
                 f"title='点击可重命名 / 合并说话人'>{_html.escape(name)}</a> "
             ) if (spk is not None and name) else ""
             meta.append({"start_ms": start_ms, "end_ms": end_ms, "idx": i})
             html_parts.append(
                 f"<div style='margin-bottom:4px;'>{ts_html} {spk_html}"
-                f"<span style='color:#c0caf5;'>{_html.escape(text)}</span></div>"
+                f"<span style='color:{pal['body']};'>{_html.escape(text)}</span></div>"
             )
         self._sentences_meta = meta
         if html_parts:
@@ -1956,11 +1992,15 @@ class MainWindow(QMainWindow):
         old_model = self.config.get("asr_model", "fun-asr-nano")
         old_dir = self.config.get("model_dir", "mod")
         old_vad = self.config.get("vad_level", "medium")
+        old_theme = self.config.get("theme", "dark")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
         new_model = self.config.get("asr_model", old_model)
         new_dir = self.config.get("model_dir", old_dir)
         new_vad = self.config.get("vad_level", old_vad)
+        # 阶段 E：主题切换立即生效（含转写区富文本重渲染）
+        if self.config.get("theme", "dark") != old_theme:
+            self._apply_theme()
         # 若模型/目录/切句档位变了：重置 manager 并重新预加载，下次转写用新配置
         if new_model != old_model or new_dir != old_dir or new_vad != old_vad:
             logger.info(f"模型配置变更（{old_model}->{new_model}, vad {old_vad}->{new_vad}），"
@@ -1981,36 +2021,24 @@ class MainWindow(QMainWindow):
         if busy:
             self.lbl_status.setText(text)
 
-    def _apply_theme(self):
+    def _apply_theme(self, rerender: bool = True):
+        """应用主题（阶段 E：样式全部来自 theme.py）。
+
+        挂在 QApplication 上，使 QDialog / QMenu / QMessageBox 等子窗口同样生效。
+        富文本配色同步更新，并按需重渲染转写区（HTML inline 色随主题变化）。
+        """
         theme = self.config.get("theme", "dark")
         logger.info(f"应用主题: {theme}")
-        if theme == "dark":
-            self.setStyleSheet("""
-                QMainWindow, QWidget { background-color: #1e1e1e; color: #e0e0e0; }
-                QPushButton { background-color: #2d2d2d; color: #e0e0e0;
-                    border: 1px solid #444; border-radius: 5px; padding: 6px 14px; }
-                QPushButton:hover { background-color: #3a3a3a; }
-                QPushButton:disabled { background-color: #2a2a2a; color: #666; }
-                QPlainTextEdit { background-color: #252526; color: #d4d4d4;
-                    border: 1px solid #3c3c3c; border-radius: 4px;
-                    font-family: 'Consolas','Microsoft YaHei'; font-size: 12px; }
-                QTextBrowser { background-color: #252526; color: #d4d4d4;
-                    border: 1px solid #3c3c3c; border-radius: 4px;
-                    font-family: 'Consolas','Microsoft YaHei'; font-size: 13px; }
-                QSlider::groove:horizontal { height: 6px; background: #3a3a3a;
-                    border-radius: 3px; }
-                QSlider::handle:horizontal { width: 14px; margin: -5px 0;
-                    background: #007acc; border-radius: 7px; }
-                QSlider::sub-page:horizontal { background: #007acc; border-radius: 3px; }
-                QLabel { color: #e0e0e0; }
-                QLineEdit { background-color: #2d2d2d; color: #e0e0e0;
-                    border: 1px solid #444; border-radius: 4px; padding: 4px; }
-                QStatusBar { background-color: #007acc; color: white; }
-                QProgressBar { border: 1px solid #444; border-radius: 4px; text-align: center; }
-                QProgressBar::chunk { background-color: #007acc; }
-            """)
+        qss = build_qss(theme)
+        self._palette = get_colors(theme)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
         else:
-            self.setStyleSheet("")
+            self.setStyleSheet(qss)
+        # 转写区富文本用的是 inline 颜色，需按新配色重渲染
+        if rerender and getattr(self, "_current_result_obj", None) is not None:
+            self._render_sentences(self._current_result_obj, self.current_audio_name or "")
 
     def closeEvent(self, event: QCloseEvent):
         logger.info("应用关闭，清理资源…")
