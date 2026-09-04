@@ -692,13 +692,16 @@ class MainWindow(QMainWindow):
         self._play_current_idx = -1    # 当前播放到的句子索引
         self._sentences_meta = []      # 当前渲染的句子元数据 [{start_ms,end_ms,start_html_idx}...]
         self._sentences_start_pos = []  # 每句在 QTextBrowser 文档中的 char 位置（用于高亮）
+        self._play_state_last = "stopped"  # 状态轮询缓存（替代 playbackStateChanged 信号）
+        self._play_stop_ticks = 0          # 连续 tick 报 stopped 计数（防加载期误判）
         if QT_MULTIMEDIA_OK:
             try:
                 from player import AudioPlayer
                 self.player = AudioPlayer(self)
                 self.player.positionChanged.connect(self._on_play_position)
                 self.player.durationChanged.connect(self._on_play_duration)
-                self.player.stateChanged.connect(self._on_play_state)
+                # 注意：不连 player 的 playbackStateChanged（PyQt6 6.11 连了会闪退），
+                # 状态改用高亮定时器轮询 playback_state()（见 _on_play_tick）
                 self.player.errorOccurred.connect(self._on_play_error)
                 # 阶段 F：真机验证诊断（后端 / 插件路径 / 音频输出设备枚举）
                 self._log_play_diagnostics()
@@ -1535,6 +1538,8 @@ class MainWindow(QMainWindow):
             return
         self.player.seek(ms)
         self.player.play()
+        self._play_state_last = "playing"
+        self._play_stop_ticks = 0
         self.lbl_status.setText(f"正在播放：{self.current_audio_name or '当前音频'}（{ms // 1000} 秒处）")
         self._start_highlight_timer()
 
@@ -1547,9 +1552,13 @@ class MainWindow(QMainWindow):
             return
         if self.player.is_playing():
             self.player.pause()
+            self._play_state_last = "paused"
+            self._play_stop_ticks = 0
             self.btn_play.setText("▶ 播放")
         else:
             self.player.play()
+            self._play_state_last = "playing"
+            self._play_stop_ticks = 0
             self.btn_play.setText("⏸ 暂停")
             self._start_highlight_timer()
 
@@ -1559,6 +1568,8 @@ class MainWindow(QMainWindow):
     def _stop_playback(self):
         if self.player is not None:
             self.player.stop()
+        self._play_state_last = "stopped"
+        self._play_stop_ticks = 0
         if self.btn_play is not None:
             self.btn_play.setText("▶ 播放")
         if self.slider_pos is not None:
@@ -1593,6 +1604,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_play_state(self, state: str):
+        """播放状态变化（轮询驱动，见 _on_play_tick；不再由信号触发）。"""
         if state == "playing":
             self.btn_play.setText("⏸ 暂停")
         else:
@@ -1602,16 +1614,55 @@ class MainWindow(QMainWindow):
                     self.slider_pos.setValue(0)
                 self._play_current_idx = -1
                 self._clear_highlight()
+                self._stop_highlight_timer()   # 自然播完/停止后停掉轮询
+
+    def _on_play_tick(self):
+        """高亮定时器每次触发：状态轮询（替代 playbackStateChanged 信号）+ 位置高亮。
+
+        修复（2026-09-04）：PyQt6 6.11 + Qt6.11 下只要连接了 playbackStateChanged，
+        带音频输出的 play() 必然触发 Qt6Core 崩溃（0xc0000409）闪退（连接类型无关，
+        连位置/时长/错误信号均无碍）。故改为每 300ms 读一次 playback_state()。
+        状态机防抖：加载期/启动瞬间播放器仍报 stopped，只有“接近时长末尾的 stopped”
+        或“连续 5 拍(~1.5s) stopped”才算真正停止，避免误触发 UI 复位与高亮清空。
+        """
+        if self.player is None:
+            return
+        st = self.player.playback_state()
+        last = self._play_state_last
+        if st == "playing":
+            self._play_stop_ticks = 0
+            if last != "playing":
+                self._play_state_last = "playing"
+                self._on_play_state("playing")
+        elif st == "paused":
+            self._play_stop_ticks = 0
+            if last != "paused":
+                self._play_state_last = "paused"
+                self._on_play_state("paused")
+        else:  # stopped
+            d = self.player.duration() if self.player else 0
+            pos = self.player.position() if self.player else 0
+            if last == "playing":
+                near_end = d > 0 and pos >= d - 150
+                if near_end:
+                    self._play_state_last = "stopped"
+                    self._on_play_state("stopped")   # 自然播完
+                else:
+                    self._play_stop_ticks += 1
+                    if self._play_stop_ticks >= 5:   # 卡住/异常停止兜底
+                        self._play_state_last = "stopped"
+                        self._on_play_state("stopped")
+            # last==stopped 且未在播：媒体加载中或尚未真正播放，忽略以免闪 UI
+        if self.player is not None:
+            self._highlight_current_sentence(self.player.position())
 
     # ---------- 播放高亮 ----------
     def _start_highlight_timer(self):
         if self._play_highlighter_timer is None:
             self._play_highlighter_timer = QTimer(self)
             self._play_highlighter_timer.setInterval(300)
-            self._play_highlighter_timer.timeout.connect(
-                lambda: self._highlight_current_sentence(
-                    self.player.position() if self.player else 0)
-            )
+            # tick = 状态轮询（替代已废弃的 playbackStateChanged 信号）+ 位置高亮
+            self._play_highlighter_timer.timeout.connect(self._on_play_tick)
         self._play_highlighter_timer.start()
 
     def _stop_highlight_timer(self):
