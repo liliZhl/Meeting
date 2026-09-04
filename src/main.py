@@ -1423,7 +1423,7 @@ class MainWindow(QMainWindow):
             self._play_highlighter_timer.stop()
 
     def _highlight_current_sentence(self, pos_ms: int):
-        """根据播放位置高亮当前句（找到则整句加底色）。"""
+        """根据播放位置高亮当前句（找到则滚动 + extraSelection 黄底）。"""
         meta = self._sentences_meta
         if not meta or self.txt_transcript is None:
             return
@@ -1438,33 +1438,48 @@ class MainWindow(QMainWindow):
         if idx < 0:
             self._clear_highlight()
             return
-        # 高亮第 idx 句：QTextBrowser 无直接按 block 高亮富文本的简单方式，
-        # 用 QTextCursor 查找句子起始文本近似高亮：简单方案——用 extraSelections 只能选连续区域。
-        # 由于 QTextBrowser HTML 不便逐句定位，改为滚动到该句 + 用 find 定位起始时间戳文本。
-        self._scroll_to_sentence(idx)
-
-    def _scroll_to_sentence(self, idx: int):
-        """滚动视图使第 idx 句可见（以时间戳文本定位）。"""
         m = self._sentences_meta[idx]
-        start_ms = m["start_ms"]
-        hh, mm, ss = start_ms // 3600000, (start_ms % 3600000) // 60000, (start_ms % 60000) // 1000
+        # 定位该句所在 block 并整行高亮
+        cur = self._find_sentence_cursor(m["start_ms"])
+        if cur is None:
+            return
+        # 高亮整个 block（句段）
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(255, 200, 60, 70))
+        sel = self.txt_transcript.textCursor()
+        sel.setPosition(cur.selectionStart())
+        sel.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        es = QTextEdit.ExtraSelection()
+        es.cursor = sel
+        es.format = fmt
+        self.txt_transcript.setExtraSelections([es])
+        # 滚动到可见
+        self.txt_transcript.setTextCursor(cur)
+        self.txt_transcript.ensureCursorVisible()
+
+    def _find_sentence_cursor(self, start_ms: int):
+        """按句子起始时间戳文本定位 QTextCursor（找不到返回 None）。"""
+        hh, mm, ss = (start_ms // 3600000, (start_ms % 3600000) // 60000,
+                      (start_ms % 60000) // 1000)
         anchor = f"{hh:02d}:{mm:02d}:{ss:02d}"
-        cur = self.txt_transcript.textCursor()
-        # 用文档查找定位
         doc = self.txt_transcript.document()
         c = doc.find(anchor)
         if not c.isNull():
-            self.txt_transcript.setTextCursor(c)
-            self.txt_transcript.ensureCursorVisible()
-        # 辅助高亮：把整行选中显示（简单视觉反馈）
-        if not c.isNull():
-            cur = self.txt_transcript.textCursor()
-            cur.setPosition(c.selectionStart())
-            cur.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+            return c
+        return None
+
+    def _scroll_to_sentence(self, idx: int):
+        """滚动视图使第 idx 句可见（兼容旧逻辑，现由高亮统一处理）。"""
+        m = self._sentences_meta[idx]
+        cur = self._find_sentence_cursor(m["start_ms"])
+        if cur is not None:
             self.txt_transcript.setTextCursor(cur)
+            self.txt_transcript.ensureCursorVisible()
+
 
     def _clear_highlight(self):
         if self.txt_transcript is not None:
+            self.txt_transcript.setExtraSelections([])
             cur = self.txt_transcript.textCursor()
             cur.clearSelection()
             self.txt_transcript.setTextCursor(cur)
