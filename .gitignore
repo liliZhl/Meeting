@@ -13,6 +13,10 @@ env/
 # ===== 构建产物 =====
 build/
 dist/
+dist_backup*/
+
+# ===== 会话/助手本地数据 =====
+.workbuddy/
 
 # ===== 运行时（模型 / ffmpeg / FunASR 源码 / wheels，体积大且可再生）=====
 runtime/
