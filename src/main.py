@@ -699,6 +699,9 @@ class MainWindow(QMainWindow):
                 self.player.positionChanged.connect(self._on_play_position)
                 self.player.durationChanged.connect(self._on_play_duration)
                 self.player.stateChanged.connect(self._on_play_state)
+                self.player.errorOccurred.connect(self._on_play_error)
+                # 阶段 F：真机验证诊断（后端 / 插件路径 / 音频输出设备枚举）
+                self._log_play_diagnostics()
             except Exception as e:
                 logger.warning(f"播放器初始化失败: {e}")
                 self.player = None
@@ -726,6 +729,28 @@ class MainWindow(QMainWindow):
         self._update_load_btn_state()
 
     # ---------- 启动预加载模型 ----------
+    def _log_play_diagnostics(self):
+        """阶段 F：把媒体后端、Qt 插件路径、音频输出设备写入日志（真机验证依据）。"""
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+            from PyQt6.QtCore import QLibraryInfo
+            backend = os.environ.get("QT_MEDIA_BACKEND", "(自动选择)")
+            plugin_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)
+            mm_dir = Path(plugin_path) / "multimedia"
+            plugins = sorted(p.name for p in mm_dir.glob("*.dll")) if mm_dir.exists() else []
+            devs = [d.description() for d in QMediaDevices.audioOutputs()]
+            logger.info(
+                f"[播放诊断] backend={backend} | 插件路径={plugin_path} "
+                f"| multimedia 插件={plugins or '缺失!'} | 音频输出设备={devs or '未枚举到!'}"
+            )
+        except Exception as e:
+            logger.warning(f"[播放诊断] 输出失败: {e}")
+
+    def _on_play_error(self, msg: str):
+        """播放出错：状态栏 + 日志（player 已记录详细日志）。"""
+        logger.error(f"播放错误回调: {msg}")
+        self.lbl_status.setText(f"播放出错：{msg}")
+
     def _update_load_btn_state(self):
         """根据模型加载状态更新「加载模型」按钮的文案/可用性。"""
         if not hasattr(self, "btn_load_model"):

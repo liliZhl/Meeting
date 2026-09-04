@@ -11,6 +11,9 @@ PyInstaller 打包配置（onedir 模式）
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dynamic_libs
 
+import glob
+import os
+
 datas = []
 binaries = []
 hiddenimports = []
@@ -56,6 +59,9 @@ for pkg in _collect_pkgs:
 hiddenimports += [
     "asr_engine",
     "model_manager",
+    "player",
+    "store",
+    "theme",
     "funasr.register",
     "funasr.auto.auto_model",
     "funasr.models.fun_asr_nano.checkpoint_utils",
@@ -92,6 +98,42 @@ try:
     print(f"[spec] collect_dynamic_libs('torch') OK: {len(torch_bins)} bins")
 except Exception as e:
     print(f"[spec] collect_dynamic_libs('torch') FAILED: {e}")
+
+# ── 阶段 F：QtMultimedia 播放支持 ─────────────────────────────────────
+# 1) Python 模块 + Qt6Multimedia DLL
+try:
+    d, b, h = collect_all("PyQt6.QtMultimedia")
+    datas += d
+    binaries += b
+    hiddenimports += h
+    print(f"[spec] collect_all('PyQt6.QtMultimedia') OK: {len(d)} datas, {len(b)} bins, {len(h)} hidden")
+except Exception as e:
+    print(f"[spec] collect_all('PyQt6.QtMultimedia') FAILED: {e}")
+
+# 2) Qt6 多媒体后端插件（ffmpeg / windows）。PyInstaller 官方 PyQt6 hook 不收集，
+#    上一版 EXE 因缺此目录导致播放完全不可用（dist 内 plugins 下无 multimedia）。
+try:
+    import PyQt6 as _PyQt6
+    _qt6_dir = os.path.join(os.path.dirname(_PyQt6.__file__), "Qt6")
+    _mm_plugin_dir = os.path.join(_qt6_dir, "plugins", "multimedia")
+    _n = 0
+    for src in glob.glob(os.path.join(_mm_plugin_dir, "*.dll")):
+        binaries.append((src, "PyQt6/Qt6/plugins/multimedia"))
+        _n += 1
+    print(f"[spec] multimedia 插件收集: {_n} 个 -> {glob.glob(os.path.join(_mm_plugin_dir, '*.dll'))}")
+except Exception as e:
+    print(f"[spec] multimedia 插件收集 FAILED: {e}")
+
+# 3) ffmpeg 解码 DLL（Qt 自带 ffmpeg 后端运行时动态加载，非链接依赖，需手动带上）
+try:
+    _n = 0
+    for pattern in ("av*.dll", "sw*.dll"):
+        for src in glob.glob(os.path.join(_qt6_dir, "bin", pattern)):
+            binaries.append((src, "PyQt6/Qt6/bin"))
+            _n += 1
+    print(f"[spec] ffmpeg 解码 DLL 收集: {_n} 个")
+except Exception as e:
+    print(f"[spec] ffmpeg DLL 收集 FAILED: {e}")
 
 # scipy / numpy 子模块（不再用 collect_submodules 全量收集——上面 collect_all 已含）
 # 去重

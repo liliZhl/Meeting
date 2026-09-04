@@ -34,6 +34,7 @@ class AudioPlayer(QObject):
     positionChanged = pyqtSignal(int)      # 播放位置 ms
     durationChanged = pyqtSignal(int)      # 总时长 ms
     stateChanged = pyqtSignal(str)         # stopped | playing | paused
+    errorOccurred = pyqtSignal(str)        # 播放错误信息（阶段 F 真机诊断）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,17 +51,24 @@ class AudioPlayer(QObject):
             self._player.positionChanged.connect(self._on_position)
             self._player.durationChanged.connect(self._on_duration)
             self._player.playbackStateChanged.connect(self._on_state)
+            self._player.errorOccurred.connect(self._on_error)
 
     # ---------- 内部转发 ----------
     def _on_position(self, ms: int):
         self.positionChanged.emit(int(ms))
 
     def _on_duration(self, ms: int):
+        logger.info(f"[播放诊断] durationChanged: {int(ms)} ms, source={self._source}")
         self.durationChanged.emit(int(ms))
 
     def _on_state(self, state):
         name = {0: "stopped", 1: "paused", 2: "playing"}.get(int(state), "stopped")
         self.stateChanged.emit(name)
+
+    def _on_error(self, err, err_str: str):
+        msg = f"播放错误(code={int(err)}): {err_str or '(无详细信息)'}"
+        logger.error(f"[播放诊断] {msg}")
+        self.errorOccurred.emit(err_str or f"错误码 {int(err)}")
 
     # ---------- 对外 API ----------
     @property
