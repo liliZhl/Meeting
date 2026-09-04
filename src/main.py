@@ -118,16 +118,17 @@ try:
         QSlider,
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent, QUrl
-    from PyQt6.QtGui import QFont, QTextCursor, QCloseEvent, QTextCharFormat, QColor
+    from PyQt6.QtGui import (
+        QFont, QTextCursor, QCloseEvent, QTextCharFormat, QColor, QCursor,
+    )
     PYQT_OK = True
 
     # 播放功能依赖 QtMultimedia（阶段 C）
     try:
-        # Windows 上用 windows 媒体后端（WMF/DirectSound）：默认 ffmpeg 后端在
-        # 远程桌面/无独显会话下枚举 MFT 时会崩（h264_mf/hevc_mf）；仅当用户
-        # 显式设置了 QT_MEDIA_BACKEND 时不覆盖。
-        if os.name == "nt" and not os.environ.get("QT_MEDIA_BACKEND"):
-            os.environ["QT_MEDIA_BACKEND"] = "windows"
+        # 后端策略（阶段 F 调整）：
+        #   Qt 6.11 自带 ffmpegmediaplugin，对 16k PCM wav 解码最稳、无系统解码器依赖，
+        #   因此不再强制 windows(WMF) 后端，交给 Qt 自己选择。
+        #   需要切回 WMF 时设置环境变量 QT_MEDIA_BACKEND=windows 即可覆盖。
         from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput  # noqa: F401
         QT_MULTIMEDIA_OK = True
     except Exception:
@@ -876,6 +877,9 @@ class MainWindow(QMainWindow):
         tl.setContentsMargins(0, 0, 0, 0)
         th = QHBoxLayout()
         th.addWidget(QLabel("📝 转写结果（含说话人）"))
+        lbl_ts_tip = QLabel("点时间戳跳转 · 点说话人改名/合并")
+        lbl_ts_tip.setObjectName("lblTranscriptTip")
+        th.addWidget(lbl_ts_tip)
         th.addStretch(1)
         self.btn_transcribe = QPushButton("🔊 开始转写")
         self.btn_transcribe.setObjectName("btnTranscribe")
@@ -1261,7 +1265,11 @@ class MainWindow(QMainWindow):
             else:
                 name = ""
             ts_html = self._fmt_ts_html(start_ms, end_ms, start_ms)
-            spk_html = f"<span style='color:#9ece6a;'>{_html.escape(name)}</span> " if name else ""
+            # 阶段 D：说话人标签可点击（href = spk:<编号>），点击弹菜单改名/合并
+            spk_html = (
+                f"<a href='spk:{spk}' style='color:#9ece6a; text-decoration:none;' "
+                f"title='点击可重命名 / 合并说话人'>{_html.escape(name)}</a> "
+            ) if (spk is not None and name) else ""
             meta.append({"start_ms": start_ms, "end_ms": end_ms, "idx": i})
             html_parts.append(
                 f"<div style='margin-bottom:4px;'>{ts_html} {spk_html}"
@@ -1294,16 +1302,143 @@ class MainWindow(QMainWindow):
         self.txt_transcript.setPlainText(text)
 
     def _on_ts_link_clicked(self, url: QUrl):
-        """点击句子时间戳 -> 跳转播放。"""
+        """点击转写区链接：时间戳 -> 跳转播放；说话人 -> 改名/合并菜单。"""
         href = url.toString()
-        logger.info(f"点击时间戳链接: {href}")
-        if not href.startswith("jump:"):
+        if href.startswith("jump:"):
+            logger.info(f"点击时间戳链接: {href}")
+            try:
+                ms = int(href.split(":", 1)[1])
+            except Exception:
+                return
+            self._seek_play(ms)
+        elif href.startswith("spk:"):
+            logger.info(f"点击说话人标签: {href}")
+            try:
+                spk = int(href.split(":", 1)[1])
+            except Exception:
+                return
+            self._on_speaker_clicked(spk)
+
+    # ========== 阶段 D：说话人编辑（重命名 / 合并） ==========
+
+    def _speaker_count(self, result, spk: int) -> int:
+        """统计某说话人的句数。"""
+        return sum(1 for s in result.sentences if s.get("speaker") == spk)
+
+    def _is_default_speaker_name(self, name: str, spk: int) -> bool:
+        """判断显示名是否还是默认的「说话人N」。"""
+        return (not name) or name.strip() == f"说话人{spk}"
+
+    def _on_speaker_clicked(self, spk: int):
+        """点击说话人标签 -> 弹出菜单（重命名 / 合并到）。"""
+        result = self._current_result_obj
+        if result is None or not result.sentences:
             return
-        try:
-            ms = int(href.split(":", 1)[1])
-        except Exception:
+        cur_name = result.speakers.get(spk, f"说话人{spk}")
+        others = sorted(k for k in result.speakers if k != spk)
+        # 句子里出现过、但 speakers 映射缺失的编号也补进去，避免出现合并不了的目标
+        for s in result.sentences:
+            k = s.get("speaker")
+            if k is not None and k != spk and k not in others:
+                others.append(k)
+        others.sort()
+
+        menu = QMenu(self)
+        act_rename = menu.addAction(f"✏️ 重命名「{cur_name}」…")
+        merge_acts = {}
+        if others:
+            sub = menu.addMenu("🔀 合并到")
+            for k in others:
+                kname = result.speakers.get(k, f"说话人{k}")
+                merge_acts[sub.addAction(f"{kname}（{self._speaker_count(result, k)} 句）")] = k
+        act = menu.exec(QCursor.pos())
+        if act is None:
             return
-        self._seek_play(ms)
+        if act == act_rename:
+            self._rename_speaker(spk)
+        elif act in merge_acts:
+            self._merge_speaker(spk, merge_acts[act])
+
+    def _rename_speaker(self, spk: int):
+        """重命名某个说话人（该说话人所有句子统一更新）。"""
+        result = self._current_result_obj
+        if result is None:
+            return
+        cur_name = result.speakers.get(spk, f"说话人{spk}")
+        name, ok = QInputDialog.getText(
+            self, "重命名说话人",
+            f"为「{cur_name}」输入新名称（其全部 {self._speaker_count(result, spk)} 句将统一更新）：",
+            text=cur_name,
+        )
+        if not ok:
+            return
+        name = (name or "").strip()
+        if not name or name == cur_name:
+            return
+        result.speakers[spk] = name
+        self._apply_speaker_change(f"已重命名：{cur_name} → {name}")
+
+    def _merge_speaker(self, src: int, dst: int):
+        """把说话人 src 合并到 dst（句子编号统一改为 dst）。"""
+        result = self._current_result_obj
+        if result is None:
+            return
+        src_name = result.speakers.get(src, f"说话人{src}")
+        dst_name = result.speakers.get(dst, f"说话人{dst}")
+        n = self._speaker_count(result, src)
+        tip = f"将「{src_name}」的 {n} 句合并到「{dst_name}」，合并后统一显示为「{dst_name}」。"
+        # 若源已改成真实姓名、目标仍是默认名，则保留真实姓名（更符合直觉）
+        if self._is_default_speaker_name(dst_name, dst) and not self._is_default_speaker_name(src_name, src):
+            tip += f"\n\n检测到「{src_name}」是自定义名称，合并后将沿用该名称。"
+        tip += "\n\n此操作会改写转写结果（不可撤销，重新转写可复原）。是否继续？"
+        ret = QMessageBox.question(
+            self, "合并说话人", tip,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        for s in result.sentences:
+            if s.get("speaker") == src:
+                s["speaker"] = dst
+        # 名称取舍：保留自定义名
+        if self._is_default_speaker_name(dst_name, dst) and not self._is_default_speaker_name(src_name, src):
+            result.speakers[dst] = src_name
+        result.speakers.pop(src, None)
+        self._apply_speaker_change(f"已合并：{src_name} → {result.speakers.get(dst, f'说话人{dst}')}")
+
+    def _apply_speaker_change(self, tip: str):
+        """说话人改动后的统一收尾：重渲染 + 刷新纪要输入 + 落盘 + 提示。"""
+        result = self._current_result_obj
+        if result is None:
+            return
+        header = self.current_audio_name or ""
+        self._play_current_idx = -1      # 重渲染后强制重新高亮
+        self._render_sentences(result, header)
+        # 纪要输入同步刷新：AI 收到的文本用新名字
+        self.current_transcript = result.to_text()
+        # 落盘（有记录才写；无记录时仅内存生效，等归档时一起存）
+        if self.current_record_id and self.store is not None:
+            try:
+                ok = self.store.update_transcript(
+                    self.current_record_id, result.sentences, result.speakers
+                )
+                logger.info(f"说话人改动已落盘: {self.current_record_id} ok={ok}")
+            except Exception as e:
+                logger.error(f"说话人改动落盘失败: {e}")
+        self.lbl_status.setText(tip + self._summary_stale_hint())
+        logger.info(f"说话人改动: {tip}")
+
+    def _summary_stale_hint(self) -> str:
+        """若已生成过纪要，提示新名字需要重新生成纪要才生效。"""
+        if self.txt_summary is None:
+            return ""
+        txt = self.txt_summary.toPlainText().strip()
+        if not txt:
+            return ""
+        if txt.startswith("该记录尚未生成纪要") or txt.startswith("会议纪要将显示在这里"):
+            return ""
+        return "（如需纪要也用新名字，请重新生成纪要）"
 
     def _ensure_play_source(self) -> bool:
         """确保播放源已设置（当前记录/音频的 wav）。

@@ -209,13 +209,31 @@ class RecordStore:
 
     # ---------- 说话人映射持久化 ----------
     def save_speakers(self, rid: str, speakers: dict) -> None:
-        """重命名/合并说话人后更新 transcript.json 里的 speakers 映射。"""
+        """重命名/合并说话人后更新 transcript.json 里的 speakers 映射。
+
+        注意：本方法只改映射，不改句子编号。合并场景请改用
+        update_transcript()，它会连同 sentences 一起写回，避免映射与句子不一致。
+        """
         data = self.load_transcript(rid)
         if data is None:
             return
         data["speakers"] = {str(k): v for k, v in speakers.items()}
-        # 同时改写句子中的 speaker 编号（合并场景：句子编号已统一）
         _write_json(self.transcript_path(rid), data)
+
+    def update_transcript(self, rid: str, sentences: list, speakers: dict) -> bool:
+        """整体写回转写结果（阶段 D：说话人改名/合并后使用）。
+
+        一次写回 sentences + speakers，保证两者始终一致。
+        返回 True 表示写回成功（记录原本就有 transcript.json）。
+        """
+        data = self.load_transcript(rid)
+        if data is None:
+            return False
+        data["sentences"] = sentences
+        data["speakers"] = {str(k): v for k, v in speakers.items()}
+        data["updated_at"] = _now_iso()
+        _write_json(self.transcript_path(rid), data)
+        return True
 
     # ---------- 旧录音迁移（防御性） ----------
     @classmethod
