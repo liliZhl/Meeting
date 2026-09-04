@@ -653,13 +653,51 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._refresh_hist_list()   # 阶段 B：加载历史列表
         self._check_first_run()
-        self._start_model_preload()
+        # 注意：不再启动时自动加载模型，由用户点击「🧠 加载模型」手动加载
+        self._update_load_btn_state()
 
     # ---------- 启动预加载模型 ----------
-    def _start_model_preload(self):
-        """启动后后台预加载 ASR 模型，转写时零等待。
+    def _update_load_btn_state(self):
+        """根据模型加载状态更新「加载模型」按钮的文案/可用性。"""
+        if not hasattr(self, "btn_load_model"):
+            return
+        try:
+            import model_manager as _mm
+            mgr = self._model_manager or _mm._default_manager
+        except Exception:
+            mgr = None
+        if mgr is not None:
+            st = mgr.state
+            if st == "ready":
+                self.btn_load_model.setText("✅ 模型已就绪")
+                self.btn_load_model.setEnabled(False)
+                return
+            if st == "loading":
+                self.btn_load_model.setText("⏳ 加载中…")
+                self.btn_load_model.setEnabled(False)
+                return
+        # idle / failed / 无管理器：可点击
+        self.btn_load_model.setText("🧠 加载模型")
+        self.btn_load_model.setEnabled(True)
 
-        仅当模型目录就绪时预加载；否则保持 idle，等转写时再处理。
+    def _on_load_model_clicked(self):
+        """手动加载模型（替代启动自动预加载）。"""
+        logger.info("[按钮] 点击「加载模型」")
+        status = self._check_model_status()
+        if status.startswith("⚠️"):
+            QMessageBox.warning(
+                self, "模型未就绪",
+                f"{status}\n\n请先在「⚙️ 配置」中检查模型目录，或确认模型文件完整。",
+            )
+            return
+        self.btn_load_model.setText("⏳ 加载中…")
+        self.btn_load_model.setEnabled(False)
+        self._start_model_preload()
+
+    def _start_model_preload(self):
+        """后台加载 ASR 模型（供手动「加载模型」按钮与配置变更后调用）。
+
+        仅当模型目录就绪时加载；否则保持 idle。
         进度通过定时轮询状态更新到状态栏（后台线程不能直接碰 UI）。
         """
         model_dir = self.config.get("model_dir", "mod")
@@ -674,7 +712,9 @@ class MainWindow(QMainWindow):
         model_key = self.config.get("asr_model", DEFAULT_ASR_MODEL)
         sub = model_key if model_key in ASR_MODELS else DEFAULT_ASR_MODEL
         if not (mp / sub).exists():
-            logger.warning(f"模型目录未就绪（{sub}），跳过启动预加载")
+            logger.warning(f"模型目录未就绪（{sub}），无法加载")
+            self.lbl_status.setText(f"⚠️ 模型目录未就绪：{mp / sub}")
+            self._update_load_btn_state()
             return
 
         try:
@@ -683,11 +723,20 @@ class MainWindow(QMainWindow):
             manager = get_manager(model_root=str(mp), asr_model=sub,
                                   vad_level=vad_level)
         except Exception as e:
-            logger.warning(f"ModelManager 初始化失败，跳过预加载: {e}")
+            logger.warning(f"ModelManager 初始化失败: {e}")
+            self.lbl_status.setText(f"⚠️ 模型管理器初始化失败: {e}")
+            self._update_load_btn_state()
+            return
+
+        # 若已在加载或已就绪，则只需同步按钮状态
+        if manager.state in ("loading", "ready"):
+            self._update_load_btn_state()
+            if manager.state == "ready":
+                self.lbl_status.setText("✅ 模型已就绪，可直接转写")
             return
 
         self._model_manager = manager
-        self.lbl_status.setText("正在后台加载模型（可先进行其他操作）…")
+        self.lbl_status.setText("正在加载模型（首次约需 1 分钟，可先进行其他操作）…")
 
         # 进度回调：后台线程 -> 信号 -> 主线程
         if self._preload_sig is None:
@@ -697,8 +746,10 @@ class MainWindow(QMainWindow):
 
         manager.load_async(progress_callback=self._preload_sig.emit_progress)
 
-        # 主线程 QTimer 轮询状态，后台加载完成/失败时刷新状态栏
+        # 主线程 QTimer 轮询状态，后台加载完成/失败时刷新状态栏与按钮
         from PyQt6.QtCore import QTimer
+        if self._preload_poll_timer is not None:
+            self._preload_poll_timer.stop()
         self._preload_poll_count = 0
         def _poll():
             if manager is None:
@@ -707,6 +758,7 @@ class MainWindow(QMainWindow):
             if st in ("ready", "failed"):
                 self._on_preload_state(st, manager.error)
                 self._preload_poll_timer.stop()
+                self._update_load_btn_state()
             else:
                 self._preload_poll_count += 1
                 if self._preload_poll_count % 4 == 0:  # ~每 2s 刷新一次提示
@@ -760,6 +812,11 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.btn_stop)
         toolbar.addWidget(self.btn_import)
         toolbar.addStretch(1)
+        self.btn_load_model = QPushButton("🧠 加载模型")
+        self.btn_load_model.setObjectName("btnLoadModel")
+        self.btn_load_model.setToolTip("手动加载语音识别模型（首次约需 1 分钟；加载后转写无需再等待）")
+        self.btn_load_model.clicked.connect(self._on_load_model_clicked)
+        toolbar.addWidget(self.btn_load_model)
         self.btn_config = QPushButton("⚙️ 配置")
         self.btn_config.setObjectName("btnConfig")
         toolbar.addWidget(self.btn_config)
@@ -929,7 +986,7 @@ class MainWindow(QMainWindow):
         self._restart_preload_after_config()
 
     def _restart_preload_after_config(self):
-        """配置弹窗关闭后调用：若管理器已存在则重置，并重新按新配置预加载。"""
+        """配置弹窗关闭后调用：重置管理器（不自动加载，等用户点「加载模型」）。"""
         try:
             import model_manager as _mm
             if _mm._default_manager is not None:
@@ -937,9 +994,16 @@ class MainWindow(QMainWindow):
                 logger.info("配置变更后 manager 已重置")
         except Exception as e:
             logger.warning(f"重置 manager 失败: {e}")
-        self._start_model_preload()
+        # 清掉轮询 timer（避免旧轮询引用已重置的 manager）
+        if self._preload_poll_timer is not None:
+            self._preload_poll_timer.stop()
+            self._preload_poll_timer = None
+        self._model_manager = None
+        self._update_load_btn_state()
         # 立即刷新状态栏模型状态
         self.lbl_status.setText(self._check_model_status())
+        if not self._check_model_status().startswith("⚠️"):
+            self.lbl_status.setText(self._check_model_status() + "（点击「🧠 加载模型」开始加载）")
 
     # ---------- 历史记录（阶段 B） ----------
     def _refresh_hist_list(self):
@@ -1399,6 +1463,9 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(not busy)
         self.btn_import.setEnabled(not busy)
         self.btn_record.setEnabled(not busy)
+        if hasattr(self, "btn_load_model"):
+            # 忙时不禁止加载按钮本体，但防重复：由 _update_load_btn_state 管状态
+            self.btn_load_model.setEnabled(not busy)
         if busy:
             self.lbl_status.setText(text)
 
