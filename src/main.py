@@ -52,6 +52,7 @@ LOG_DIR = APP_DIR / "logs"
 MODEL_DIR = APP_DIR / "mod"                     # 模型目录（不打包，分发时一起拷）
 BIN_DIR = APP_DIR / "bin"                       # ffmpeg.exe 所在目录
 FFMPEG_PATH = BIN_DIR / "ffmpeg.exe"
+RECORDS_DIR = APP_DIR / "records"               # 历史记录（阶段 B）
 
 # 确保关键目录存在
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,6 +114,7 @@ try:
         QPushButton, QTextEdit, QLabel, QFileDialog, QMessageBox, QDialog,
         QLineEdit, QComboBox, QDialogButtonBox, QProgressDialog, QFrame, QStatusBar,
         QProgressBar, QFormLayout, QPlainTextEdit, QSplitter,
+        QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog, QMenu,
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent
     from PyQt6.QtGui import QFont, QTextCursor, QCloseEvent
@@ -621,6 +623,9 @@ class MainWindow(QMainWindow):
         self.current_audio = ""
         self.current_audio_name = ""
         self.current_transcript = ""
+        self.current_record_id = None   # 当前选中的历史记录 id（阶段 B）
+        self._pending_result_obj = None
+        self._current_result_obj = None
         self.recorder = None
         self.transcriber = None
         self.summarizer = None
@@ -630,8 +635,23 @@ class MainWindow(QMainWindow):
         self._preload_sig = None
         self._preload_poll_timer = None
 
+        # 历史记录存储（阶段 B）
+        try:
+            from store import RecordStore
+            self.store = RecordStore(str(RECORDS_DIR))
+            # 防御性：扫描旧 recordings/*.wav 转成记录（幂等，迁移后不删源）
+            legacy_dir = APP_DIR / "recordings"
+            if legacy_dir.exists():
+                n = RecordStore.migrate_legacy(self.store, str(legacy_dir))
+                if n:
+                    logger.info(f"旧录音迁移: {n} 条")
+        except Exception as e:
+            logger.warning(f"历史记录存储初始化失败: {e}")
+            self.store = None
+
         self._build_ui()
         self._apply_theme()
+        self._refresh_hist_list()   # 阶段 B：加载历史列表
         self._check_first_run()
         self._start_model_preload()
 
@@ -800,7 +820,48 @@ class MainWindow(QMainWindow):
         splitter.addWidget(tg)
         splitter.addWidget(sg)
         splitter.setSizes([400, 300])
-        root.addWidget(splitter, stretch=1)
+
+        # ---- 阶段 B：左右分栏 = 历史栏 + 原内容 ----
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("mainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+
+        # 左：历史记录栏
+        hist_panel = QWidget()
+        hist_panel.setObjectName("histPanel")
+        hist_panel.setMinimumWidth(190)
+        hist_panel.setMaximumWidth(320)
+        hl = QVBoxLayout(hist_panel)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(4)
+        hist_title = QLabel("🗂 历史记录")
+        hist_title.setObjectName("histTitle")
+        hist_title.setStyleSheet("font-weight: bold; padding: 2px;")
+        hl.addWidget(hist_title)
+        self.hist_list = QListWidget()
+        self.hist_list.setObjectName("histList")
+        self.hist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.hist_list.customContextMenuRequested.connect(self._on_hist_menu)
+        self.hist_list.itemClicked.connect(self._on_hist_selected)
+        self.hist_list.setToolTip("右键可重命名 / 删除记录")
+        hl.addWidget(self.hist_list, stretch=1)
+        btn_row = QHBoxLayout()
+        self.btn_hist_new = QPushButton("＋ 新记录")
+        self.btn_hist_new.setObjectName("btnHistNew")
+        self.btn_hist_new.setToolTip("从当前音频新建一条记录（用于手动归档）")
+        self.btn_hist_new.clicked.connect(self._on_hist_new)
+        btn_row.addWidget(self.btn_hist_new)
+        hl.addLayout(btn_row)
+        self.main_splitter.addWidget(hist_panel)
+
+        # 右：原内容容器（把 splitter 塞进一个容器 widget）
+        right_wrap = QWidget()
+        rl = QVBoxLayout(right_wrap)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(splitter)
+        self.main_splitter.addWidget(right_wrap)
+        self.main_splitter.setSizes([210, 890])
+        root.addWidget(self.main_splitter, stretch=1)
 
         # 进度条
         self.progress = QProgressBar()
@@ -880,6 +941,213 @@ class MainWindow(QMainWindow):
         # 立即刷新状态栏模型状态
         self.lbl_status.setText(self._check_model_status())
 
+    # ---------- 历史记录（阶段 B） ----------
+    def _refresh_hist_list(self):
+        """重建左侧历史列表（新 -> 旧）。"""
+        if self.store is None:
+            return
+        self.hist_list.blockSignals(True)
+        self.hist_list.clear()
+        recs = self.store.list_records()
+        recs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        for r in recs:
+            rid = r.get("id", "")
+            title = r.get("title", rid)
+            status = r.get("status", "pending")
+            icon = {"summarized": "✅", "transcribed": "📝", "pending": "🎙️"}.get(status, "📄")
+            item = QListWidgetItem(f"{icon} {title}")
+            item.setData(Qt.ItemDataRole.UserRole, rid)
+            item.setToolTip(f"{title}\n状态: {status}\n创建: {r.get('created_at', '')}")
+            self.hist_list.addItem(item)
+        self.hist_list.blockSignals(False)
+        if recs:
+            self.lbl_status.setText(f"历史记录：{len(recs)} 条")
+
+    def _find_hist_item(self, rid: str):
+        for i in range(self.hist_list.count()):
+            item = self.hist_list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == rid:
+                return item
+        return None
+
+    def _on_hist_selected(self, item: QListWidgetItem):
+        """点击历史记录 -> 加载该记录的音频 + 转写 + 纪要。"""
+        if self.store is None:
+            return
+        rid = item.data(Qt.ItemDataRole.UserRole)
+        if not rid:
+            return
+        rec = self.store.get(rid)
+        if rec is None:
+            return
+        # 若正在转写/录音，忽略切换
+        if (self.transcriber is not None and self.transcriber.isRunning()) or \
+           (self.recorder is not None and self.recorder.isRunning()):
+            self.lbl_status.setText("请等待当前任务完成后再切换记录")
+            if self.current_record_id:
+                cur = self._find_hist_item(self.current_record_id)
+                if cur:
+                    self.hist_list.setCurrentItem(cur)
+            return
+        self.current_record_id = rid
+        self.current_audio = str(self.store.audio_path(rid))
+        self.current_audio_name = rec.get("title", rid)
+        self.lbl_audio.setText(f"音频文件：{Path(self.current_audio).name}")
+        dur = rec.get("duration_sec", 0)
+        self.lbl_duration.setText(f"时长：{format_timestamp(dur)}" if dur else "时长：--")
+        data = self.store.load_transcript(rid)
+        if data and data.get("sentences"):
+            try:
+                from asr_engine import TranscriptionResult
+                tr = TranscriptionResult.from_dict(data)
+                self.current_transcript = tr.to_text()
+                self.txt_transcript.setPlainText(f"【{self.current_audio_name}】\n" + self.current_transcript)
+                self._current_result_obj = tr
+            except Exception as e:
+                logger.warning(f"转写解析失败: {e}")
+                self.txt_transcript.setPlainText("(该记录暂无可用转写内容)")
+                self.current_transcript = ""
+                self._current_result_obj = None
+        else:
+            self.current_transcript = ""
+            self._current_result_obj = None
+            self.txt_transcript.setPlainText("该记录尚未转写。\n点击「🔊 开始转写」进行语音转写。")
+        summary = self.store.load_summary(rid)
+        if summary:
+            self.txt_summary.setPlainText(summary)
+        else:
+            self.txt_summary.setPlainText("该记录尚未生成纪要。\n点击「✨ 生成纪要」调用 AI 总结。")
+        st = {"summarized": "✅ 已总结", "transcribed": "📝 已转写，可补做纪要",
+              "pending": "🎙️ 待转写"}.get(rec.get("status", "pending"), "")
+        self.lbl_status.setText(f"已打开记录：{rec.get('title', rid)}（{st}）")
+        logger.info(f"打开历史记录: {rid} title={rec.get('title')} status={rec.get('status')}")
+
+    def _on_hist_menu(self, pos):
+        """历史记录右键菜单：重命名 / 删除。"""
+        if self.store is None:
+            return
+        item = self.hist_list.itemAt(pos)
+        if item is None:
+            return
+        rid = item.data(Qt.ItemDataRole.UserRole)
+        rec = self.store.get(rid)
+        if rec is None:
+            return
+        menu = QMenu(self)
+        act_rename = menu.addAction("✏️ 重命名")
+        act_delete = menu.addAction("🗑 删除记录")
+        act = menu.exec(self.hist_list.viewport().mapToGlobal(pos))
+        if act == act_rename:
+            new_title, ok = QInputDialog.getText(
+                self, "重命名记录", "新名称：", text=rec.get("title", "")
+            )
+            if ok and new_title.strip():
+                self.store.rename(rid, new_title.strip())
+                self._refresh_hist_list()
+                if self.current_record_id == rid:
+                    self.current_audio_name = new_title.strip()
+                    self.lbl_status.setText(f"已重命名为：{new_title.strip()}")
+                logger.info(f"重命名记录: {rid} -> {new_title.strip()}")
+        elif act == act_delete:
+            ret = QMessageBox.question(
+                self, "删除记录",
+                f"确定删除记录「{rec.get('title', rid)}」？\n将删除其音频、转写与纪要文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ret == QMessageBox.StandardButton.Yes:
+                was_current = (self.current_record_id == rid)
+                self.store.delete(rid)
+                self._refresh_hist_list()
+                if was_current:
+                    self._clear_current()
+                self.lbl_status.setText("记录已删除")
+                logger.info(f"删除记录: {rid}")
+
+    def _clear_current(self):
+        """清空当前编辑区（删除当前记录时使用）。"""
+        self.current_record_id = None
+        self.current_audio = ""
+        self.current_audio_name = ""
+        self.current_transcript = ""
+        self._current_result_obj = None
+        self.lbl_audio.setText("音频文件：无")
+        self.lbl_duration.setText("时长：--")
+        self.txt_transcript.clear()
+        self.txt_summary.clear()
+
+    def _on_hist_new(self):
+        """把当前音频手动归档为新记录（未走录音/导入自动建档的场合）。"""
+        if self.store is None:
+            return
+        if not self.current_audio or not Path(self.current_audio).exists():
+            QMessageBox.information(self, "提示", "当前没有可归档的音频。\n请先录音或导入音频。")
+            return
+        src = self.current_audio
+        try:
+            is_wav = Path(src).suffix.lower() == ".wav"
+            if not is_wav:
+                src = convert_to_wav_16k(src)
+            rid = self.store.create(
+                title=self.current_audio_name or Path(src).stem,
+                source="imported",
+            )
+            self.store.save_audio(rid, src)
+            try:
+                import wave as _w
+                with _w.open(str(self.store.audio_path(rid)), "rb") as wf:
+                    fr = wf.getframerate()
+                    n = wf.getnframes()
+                    if fr:
+                        rec = self.store.get(rid)
+                        if rec:
+                            rec["duration_sec"] = round(n / fr, 2)
+                            self.store._add_to_index(rec)
+            except Exception:
+                pass
+            self._refresh_hist_list()
+            self.lbl_status.setText(f"已新建记录：{rid}")
+            logger.info(f"手动新建记录: {rid} src={src}")
+        except Exception as e:
+            logger.error(f"新建记录失败: {e}")
+            QMessageBox.warning(self, "新建失败", str(e))
+
+    def _auto_archive(self, wav_path: str, source: str = "recorded", title: str = ""):
+        """录音/导入完成后自动归档为一条历史记录。
+
+        - 复制 16k wav 进记录目录（播放/转写对齐）
+        - 更新索引，刷新左侧列表并选中新记录
+        """
+        if self.store is None:
+            return
+        try:
+            if not wav_path or not Path(wav_path).exists():
+                return
+            dur = 0.0
+            try:
+                import wave as _w
+                with _w.open(wav_path, "rb") as wf:
+                    fr = wf.getframerate()
+                    n = wf.getnframes()
+                    if fr:
+                        dur = n / fr
+            except Exception:
+                pass
+            rid = self.store.create(
+                title=title or Path(wav_path).stem,
+                source=source,
+                duration_sec=dur,
+            )
+            self.store.save_audio(rid, wav_path)
+            self.current_record_id = rid
+            self._refresh_hist_list()
+            # 高亮新记录
+            item = self._find_hist_item(rid)
+            if item:
+                self.hist_list.setCurrentItem(item)
+            logger.info(f"自动归档记录: {rid} source={source} dur={dur:.1f}s")
+        except Exception as e:
+            logger.error(f"自动归档失败: {e}")
+
     # ---------- 事件：录音 ----------
     def on_record_clicked(self):
         logger.info("[按钮] 点击「开始录音」")
@@ -920,6 +1188,8 @@ class MainWindow(QMainWindow):
         if self.recording_timer:
             self.recording_timer.stop()
         self.lbl_status.setText("录音完成")
+        # 阶段 B：录音自动归档为一条历史记录
+        self._auto_archive(path, source="recorded")
 
     def _on_record_error(self, msg):
         logger.error(f"录音错误: {msg}")
@@ -953,6 +1223,8 @@ class MainWindow(QMainWindow):
             self.lbl_audio.setText(f"音频文件：{Path(fpath).name}")
             self._update_audio_duration(converted)
             self.lbl_status.setText(f"已导入: {Path(fpath).name}")
+            # 阶段 B：导入自动归档为一条历史记录
+            self._auto_archive(converted, source="imported", title=Path(fpath).stem)
         except Exception as e:
             logger.error(f"导入失败: {e}")
             QMessageBox.warning(self, "导入失败", str(e))
@@ -991,6 +1263,7 @@ class MainWindow(QMainWindow):
         )
         self.transcriber.progress.connect(self._on_transcribe_progress)
         self.transcriber.finished.connect(self._on_transcribe_finished)
+        self.transcriber.finished_obj.connect(self._on_transcribe_finished_obj)
         self.transcriber.error.connect(self._on_transcribe_error)
         self.transcriber.start()
 
@@ -1004,9 +1277,26 @@ class MainWindow(QMainWindow):
         self.txt_transcript.setPlainText(header + transcript)
         self._set_busy(False)
         self.lbl_status.setText(f"转写完成：{self.current_audio_name}")
+        # 阶段 B：结构化结果存入当前记录
+        result_obj = getattr(self, "_pending_result_obj", None)
+        if result_obj is not None and self.current_record_id and self.store is not None:
+            try:
+                self.store.save_transcript(self.current_record_id, result_obj)
+                self._current_result_obj = result_obj
+                self._refresh_hist_list()
+                logger.info(f"转写已存入记录: {self.current_record_id}")
+            except Exception as e:
+                logger.error(f"转写存记录失败: {e}")
+        self._pending_result_obj = None
+
+    def _on_transcribe_finished_obj(self, result):
+        """结构化转写结果（阶段 B：暂存，等 finished 文本回调后统一存）。"""
+        self._pending_result_obj = result
+        logger.info(f"结构化转写结果收到: {len(result.sentences)} 句")
 
     def _on_transcribe_error(self, msg):
         logger.error(f"转写错误: {msg}")
+        self._pending_result_obj = None
         self._set_busy(False)
         self.txt_transcript.setPlainText(f"[转写失败] {msg}")
         QMessageBox.warning(
@@ -1046,6 +1336,14 @@ class MainWindow(QMainWindow):
         self.txt_summary.setPlainText(summary)
         self._set_busy(False)
         self.lbl_status.setText("纪要生成完成")
+        # 阶段 B：纪要存入当前记录
+        if self.current_record_id and self.store is not None:
+            try:
+                self.store.save_summary(self.current_record_id, summary)
+                self._refresh_hist_list()
+                logger.info(f"纪要已存入记录: {self.current_record_id}")
+            except Exception as e:
+                logger.error(f"纪要存记录失败: {e}")
 
     def _on_summary_error(self, msg):
         logger.error(f"总结错误: {msg}")
