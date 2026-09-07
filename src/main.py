@@ -135,7 +135,7 @@ try:
         QLineEdit, QComboBox, QDialogButtonBox, QProgressDialog, QFrame, QStatusBar,
         QProgressBar, QFormLayout, QPlainTextEdit, QTextBrowser, QSplitter,
         QListWidget, QListWidgetItem, QAbstractItemView, QInputDialog, QMenu,
-        QSlider,
+        QSlider, QStyle, QStyleOptionSlider,
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent, QUrl
     from PyQt6.QtGui import (
@@ -646,6 +646,80 @@ class ConfigDialog(QDialog):
         self.accept()
 
 
+class SeekSlider(QSlider):
+    """点击轨道直接跳转的进度条。
+
+    QSS（QStyleSheetStyle）接管后，QSlider 原生"点击轨道跳转"行为会退化失效
+    （2026-09-07 真机实测：仅能拖动 thumb，点轨道无反应）。本子类把左键点击
+    groove 换算成对应 value 并发出 seekRequested；点在 thumb 上仍交原生拖动；
+    点击后按住不放继续移动同样换算跳转（对齐主流播放器交互）。
+    """
+
+    seekRequested = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self._drag_from_groove = False
+
+    # ---- 几何换算 ----
+    def _sub_rects(self):
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderGroove, self)
+        handle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderHandle, self)
+        return groove, handle
+
+    def _value_at_x(self, x: float):
+        groove, handle = self._sub_rects()
+        span = groove.width() - handle.width()
+        if span <= 0 or self.maximum() <= self.minimum():
+            return None
+        # 点击 x 对齐到 handle 中心，再线性换算成 value（sliderValueFromPosition 需 int）
+        xc = int(round(x - groove.x() - handle.width() / 2.0))
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(), xc, span)
+
+    def _jump_to_x(self, x: float):
+        v = self._value_at_x(x)
+        if v is None:
+            return
+        v = max(self.minimum(), min(self.maximum(), v))
+        if v != self.value():
+            self.setValue(v)
+        self.seekRequested.emit(int(v))
+
+    # ---- 鼠标事件 ----
+    def _px(self, e) -> tuple:
+        if hasattr(e, "position"):      # Qt6
+            return float(e.position().x()), float(e.position().y())
+        return float(e.x()), float(e.y())
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            x, y = self._px(e)
+            _, handle = self._sub_rects()
+            if not handle.contains(int(x), int(y)):
+                self._drag_from_groove = True
+                self._jump_to_x(x)
+                return  # 吞掉本次按下，避免 QSS 下二次 pageStep 跳变
+        self._drag_from_groove = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_from_groove and (e.buttons() & Qt.MouseButton.LeftButton):
+            self._jump_to_x(self._px(e)[0])
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_from_groove = False
+        super().mouseReleaseEvent(e)
+
+
 # ---------------------------------------------------------------------------
 # 10. 主窗口
 # ---------------------------------------------------------------------------
@@ -694,6 +768,12 @@ class MainWindow(QMainWindow):
         self._sentences_start_pos = []  # 每句在 QTextBrowser 文档中的 char 位置（用于高亮）
         self._play_state_last = "stopped"  # 状态轮询缓存（替代 playbackStateChanged 信号）
         self._play_stop_ticks = 0          # 连续 tick 报 stopped 计数（防加载期误判）
+        self._pending_seek_ms = None       # 媒体未就绪时的时间戳跳转缓存（加载完成后执行）
+        self._seek_guard_until = 0.0       # 刚 seek 后的防回刷截止时刻（monotonic）
+        # 空格键 = 播放/暂停（应用级事件过滤器，见 eventFilter；文本输入/浏览控件放行）
+        app_inst = QApplication.instance()
+        if app_inst is not None:
+            app_inst.installEventFilter(self)
         if QT_MULTIMEDIA_OK:
             try:
                 from player import AudioPlayer
@@ -1040,12 +1120,14 @@ class MainWindow(QMainWindow):
             self.btn_play_stop.setToolTip("停止播放")
             self.btn_play_stop.clicked.connect(self._on_play_stop_clicked)
             pbl.addWidget(self.btn_play_stop)
-            self.slider_pos = QSlider(Qt.Orientation.Horizontal)
+            self.slider_pos = SeekSlider()
             self.slider_pos.setObjectName("sliderPos")
             self.slider_pos.setEnabled(False)
             self.slider_pos.setRange(0, 0)
-            self.slider_pos.setToolTip("拖动跳转播放位置")
+            self.slider_pos.setToolTip("点击或拖动跳转播放位置")
+            # 拖动 thumb / 点击轨道（seekRequested）都走同一跳转处理
             self.slider_pos.sliderMoved.connect(self._on_slider_moved)
+            self.slider_pos.seekRequested.connect(self._on_slider_moved)
             pbl.addWidget(self.slider_pos, stretch=1)
             self.lbl_play_time = QLabel("00:00 / 00:00")
             self.lbl_play_time.setObjectName("lblPlayTime")
@@ -1536,16 +1618,53 @@ class MainWindow(QMainWindow):
         return True
 
     def _seek_play(self, ms: int):
-        """跳转到指定位置播放。"""
+        """跳转到指定位置播放。
+
+        2026-09-07 修复：seek 后立即 _apply_play_position 刷新进度条/时间/高亮，
+        不再等 positionChanged 信号或轮询（WMF 下 seek 异步，期间用旧位置回刷
+        会造成"进度条不跟随"观感）。若媒体尚未加载完成（duration<=0，如刚导入
+        音频/首次 setSource），Qt 会吞掉 seek —— 此时缓存目标位置 _pending_seek_ms，
+        等 durationChanged 加载就绪后自动精确跳转。
+        """
         if self.player is None or not self._ensure_play_source():
             self.lbl_status.setText("当前没有可播放的音频")
+            return
+        d = self.player.duration() if self.player else 0
+        if d <= 0:
+            # 媒体加载中：缓存待跳位置，先起播/起轮询，就绪后由 durationChanged 接手
+            self._pending_seek_ms = int(ms)
+            self.player.play()
+            self._play_state_last = "playing"
+            self._play_stop_ticks = 0
+            self.lbl_status.setText(
+                f"正在播放：{self.current_audio_name or '当前音频'}（{ms // 1000} 秒处）")
+            self._start_highlight_timer()
             return
         self.player.seek(ms)
         self.player.play()
         self._play_state_last = "playing"
         self._play_stop_ticks = 0
+        self._seek_guard_until = time.monotonic() + 0.6  # 0.6s 内轮询不回刷旧位置
         self.lbl_status.setText(f"正在播放：{self.current_audio_name or '当前音频'}（{ms // 1000} 秒处）")
+        self._apply_play_position(ms)  # 立即刷新，不等 positionChanged/轮询
         self._start_highlight_timer()
+
+    def eventFilter(self, obj, ev):
+        """应用级快捷键：空格 = 播放/暂停（2026-09-07 新增）。
+
+        仅当焦点不在文本输入/浏览控件（QLineEdit/QTextEdit/QTextBrowser 等）时拦截，
+        避免抢走输入框的空格字符与转写区的空格翻页；焦点在按钮/空白处时，
+        空格即播放/暂停，符合主流播放器习惯。
+        """
+        if (ev.type() == QEvent.Type.KeyPress and not ev.isAutoRepeat()
+                and ev.key() == Qt.Key.Key_Space
+                and ev.modifiers() == Qt.KeyboardModifier.NoModifier):
+            fw = QApplication.focusWidget()
+            if not isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit,
+                                   QTextBrowser, QComboBox, QListWidget)):
+                self._on_play_clicked()
+                return True
+        return super().eventFilter(obj, ev)
 
     def _on_play_clicked(self):
         logger.info("[按钮] 点击「播放」")
@@ -1574,6 +1693,8 @@ class MainWindow(QMainWindow):
             self.player.stop()
         self._play_state_last = "stopped"
         self._play_stop_ticks = 0
+        self._pending_seek_ms = None
+        self._seek_guard_until = 0.0
         if self.btn_play is not None:
             self.btn_play.setText("▶ 播放")
         if self.slider_pos is not None:
@@ -1583,9 +1704,10 @@ class MainWindow(QMainWindow):
         self._clear_highlight()
 
     def _on_slider_moved(self, pos: int):
-        """拖动进度条 -> 跳转（立即刷新位置/时间，不依赖 positionChanged）。"""
+        """拖动/点击进度条 -> 跳转（立即刷新位置/时间，不依赖 positionChanged）。"""
         if self.player is not None:
             self.player.seek(pos)
+            self._seek_guard_until = time.monotonic() + 0.6  # 拖动/点击后防 tick 旧值回刷
             self._apply_play_position(pos)
 
     def _apply_play_position(self, ms: int):
@@ -1611,6 +1733,16 @@ class MainWindow(QMainWindow):
             self.lbl_play_time.setText(
                 f"{format_timestamp(self.player.position() / 1000)} / {format_timestamp(ms / 1000)}"
             )
+        # 媒体加载完成：若有点时间戳时缓存的待跳位置（当时 duration<=0 seek 被吞），现在补跳
+        if ms > 0 and self._pending_seek_ms is not None:
+            pms = self._pending_seek_ms
+            self._pending_seek_ms = None
+            logger.info(f"[播放诊断] 媒体就绪，补执行待跳 seek: {pms} ms")
+            self.player.seek(pms)
+            self._play_state_last = "playing"
+            self._play_stop_ticks = 0
+            self._seek_guard_until = time.monotonic() + 0.6
+            self._apply_play_position(pms)
 
     def _on_play_state(self, state: str):
         """播放状态变化（轮询驱动，见 _on_play_tick；不再由信号触发）。"""
@@ -1662,8 +1794,15 @@ class MainWindow(QMainWindow):
                         self._play_state_last = "stopped"
                         self._on_play_state("stopped")
             # last==stopped 且未在播：媒体加载中或尚未真正播放，忽略以免闪 UI
-        # 兜底刷新进度条/时间：即使 positionChanged 在某些后端不触发，进度条也能跟随
+        # 兜底刷新进度条/时间：即使 positionChanged 在某些后端不触发，进度条也能跟随。
+        # 刚 seek 过的窗口内（_seek_guard_until）不读 position() 回刷，避免后端异步 seek
+        # 尚未到位时用旧值把进度条拉回（造成"点时间戳进度条不跟随/闪回"）。
         if self.player is not None:
+            now = time.monotonic()
+            if now < self._seek_guard_until:
+                # guard 内：沿用 _apply_play_position 的最后写入值（即 seek 目标），不覆盖
+                return
+            self._seek_guard_until = 0.0
             self._apply_play_position(self.player.position())
 
     # ---------- 播放高亮 ----------
@@ -1749,6 +1888,8 @@ class MainWindow(QMainWindow):
         self._play_current_idx = -1
         self._play_state_last = "stopped"
         self._play_stop_ticks = 0
+        self._pending_seek_ms = None
+        self._seek_guard_until = 0.0
         self._stop_highlight_timer()
         if self.slider_pos is not None:
             self.slider_pos.setRange(0, 0)
