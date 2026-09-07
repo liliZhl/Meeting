@@ -219,7 +219,7 @@ DEFAULT_CONFIG = {
     "theme": "light",
     "summary_template": "meeting",
     "model_dir": "mod",           # 模型目录（相对 EXE 或绝对路径）
-    "asr_model": "fun-asr-nano",  # 识别模型: fun-asr-nano / sensevoice / paraformer
+    "asr_model": "sensevoice",  # 识别模型: sensevoice(默认) / fun-asr-nano / paraformer
     "vad_level": "medium",         # VAD 切句灵敏度: fine / medium / coarse
 }
 
@@ -861,14 +861,17 @@ class ConfigDialog(NfDialog):
         form.addRow("模型目录：", self.model_dir_edit)
 
         # 语音识别模型选择（延迟 import，避免启动卡顿）
-        from asr_engine import ASR_MODELS, MODEL_NANO
+        from asr_engine import ASR_MODELS, DEFAULT_ASR_MODEL
         self.asr_model_combo = QComboBox()
-        self._asr_model_keys = list(ASR_MODELS.keys())
+        # 默认模型(SenseVoice)置顶
+        self._asr_model_keys = ([DEFAULT_ASR_MODEL] +
+                                [k for k in ASR_MODELS if k != DEFAULT_ASR_MODEL])
         for k in self._asr_model_keys:
             self.asr_model_combo.addItem(ASR_MODELS[k]["label"], k)
         self.asr_model_combo.setToolTip(
-            "识别引擎：Fun-ASR-Nano 需 GPU/强 CPU（质量最高）；\n"
-            "SenseVoice / Paraformer 体积小、CPU 友好，适合无独显电脑。\n"
+            "识别引擎：SenseVoice（CPU 首选·口语稳）为默认；\n"
+            "Fun-ASR-Nano 需 GPU/强 CPU（规范长文本质量最高）；\n"
+            "Paraformer 中文+字级时间戳、CPU 较快。\n"
             "切换后需重启应用生效（首次加载新模型需下载对应文件）。"
         )
         form.addRow("语音识别模型：", self.asr_model_combo)
@@ -953,13 +956,15 @@ class ConfigDialog(NfDialog):
             self.asr_model_desc.setText(ASR_MODELS[self._asr_model_keys[idx]]["desc"])
 
     def _load_values(self):
+        from asr_engine import DEFAULT_ASR_MODEL as _DEFAULT_MODEL
         self.api_key_edit.setText(self.config.get("deepseek_api_key", ""))
         self.base_url_edit.setText(self.config.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"]))
         self.model_edit.setText(self.config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"]))
         self.model_dir_edit.setText(self.config.get("model_dir", DEFAULT_CONFIG["model_dir"]))
         # 恢复已保存的识别模型选择
-        cur = self.config.get("asr_model", "")
-        idx = self._asr_model_keys.index(cur) if cur in self._asr_model_keys else 0
+        cur = self.config.get("asr_model", _DEFAULT_MODEL)
+        idx = self._asr_model_keys.index(cur) if cur in self._asr_model_keys else \
+            (self._asr_model_keys.index(_DEFAULT_MODEL) if _DEFAULT_MODEL in self._asr_model_keys else 0)
         self.asr_model_combo.setCurrentIndex(idx)
         self._on_asr_model_changed(idx)
         # 恢复已保存的切句灵敏度
@@ -1583,8 +1588,8 @@ class MainWindow(QMainWindow):
             from asr_engine import ASR_MODELS
         except Exception:
             return "⚠️ 模型模块不可用"
-        model_key = self.config.get("asr_model", "fun-asr-nano")
-        sub = model_key if model_key in ASR_MODELS else "fun-asr-nano"
+        model_key = self.config.get("asr_model", "sensevoice")
+        sub = model_key if model_key in ASR_MODELS else "sensevoice"
         model_dir = self.config.get("model_dir", "mod")
         mp = Path(model_dir)
         if not mp.is_absolute():
@@ -2489,7 +2494,7 @@ class MainWindow(QMainWindow):
             "已开始转写，请稍候…（首次会自动加载语音模型，约需 1 分钟；"
             "加载完成后自动识别，结果会显示在此处）")
         model_dir = self.config.get("model_dir", "mod")
-        asr_model = self.config.get("asr_model", "fun-asr-nano")
+        asr_model = self.config.get("asr_model", "sensevoice")
         vad_level = self.config.get("vad_level", "medium")
         num_spk = int(self.config.get("num_speakers", 0) or 0) or None  # 0=自动
         self.transcriber = TranscriptionWorker(
@@ -2642,7 +2647,7 @@ class MainWindow(QMainWindow):
     # ---------- 事件：配置 ----------
     def on_config_clicked(self):
         logger.info("[按钮] 点击「配置」")
-        old_model = self.config.get("asr_model", "fun-asr-nano")
+        old_model = self.config.get("asr_model", "sensevoice")
         old_dir = self.config.get("model_dir", "mod")
         old_vad = self.config.get("vad_level", "medium")
         old_theme = self.config.get("theme", "light")

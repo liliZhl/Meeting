@@ -106,7 +106,7 @@ ASR_MODELS = {
 }
 
 DEFAULT_MODEL_ROOT = "mod"
-DEFAULT_ASR_MODEL = MODEL_NANO   # 默认仍用 Nano（有 GPU 目标机）
+DEFAULT_ASR_MODEL = MODEL_SENSEVOICE  # 默认 SenseVoice：CPU 可实时、口语稳；Nano 留待 GPU 真机手动切
 
 # ---------------------------------------------------------------------------
 # VAD 切句灵敏度预设（fsmn-vad 的 max_end_silence_time 参数）
