@@ -334,9 +334,11 @@ class ASREngine:
             os.chdir(asr_dir)
 
             # 通用加载参数：本地主模型 + VAD + 说话人（+ Paraformer 用 ct-punc）
-            # vad_kwargs: max_single_segment_time 防超长段（>30s 硬切，
-            #   避免单段过长；max_end_silence_time 按用户选的灵敏度档位）
-            vad_kwargs = {"max_single_segment_time": 30000,
+            # vad_kwargs: max_single_segment_time 防超长段（默认 30s 硬切；
+            #   可经 self.max_single_segment_time 覆盖——说话人聚类实验/优化用，
+            #   块越短越接近单说话人、聚类越稳）；max_end_silence_time 按灵敏度档位
+            max_seg = int(getattr(self, "max_single_segment_time", 30000) or 30000)
+            vad_kwargs = {"max_single_segment_time": max_seg,
                           "max_end_silence_time": self._vad_preset["max_end_silence_time"]}
             load_kwargs = dict(
                 model=asr_dir,                  # 本地主模型路径
