@@ -2086,6 +2086,9 @@ class MainWindow(QMainWindow):
             et = event.type()
             if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 hit = self._edge_hit(event.position())
+                # 最大化时禁用边缘缩放
+                if hit and self.isMaximized():
+                    hit = None
                 if hit:
                     self._resize_mode = hit
                     self._resize_geom0 = self.geometry()
