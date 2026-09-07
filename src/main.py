@@ -540,22 +540,221 @@ class SummaryWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# 8.5 无边框弹窗基类（2026-09-07：全部弹窗统一为无边框圆角卡片风格）
+# ---------------------------------------------------------------------------
+
+class NfDialog(QDialog):
+    """无边框圆角弹窗基类。
+
+    结构：Frameless + 透明背景 → 外层 #dlgCard（圆角面板色卡片）
+    内：标题条（拖动区 + 标题 + ✕）→ self.body（子类填充内容）。
+    拖动/双击关闭按钮由基类处理。
+    """
+
+    def __init__(self, title: str, parent=None, width: int = 460):
+        super().__init__(parent)
+        self.setObjectName("nfDlg")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._drag_off = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.card = QWidget()
+        self.card.setObjectName("dlgCard")
+        outer.addWidget(self.card)
+        cvb = QVBoxLayout(self.card)
+        cvb.setContentsMargins(14, 8, 14, 14)
+        cvb.setSpacing(8)
+
+        # 标题条（独立 widget 固定高度，避免被内容挤压）
+        title_bar = QWidget()
+        title_bar.setObjectName("dlgTitleBar")
+        title_bar.setFixedHeight(34)
+        tb = QHBoxLayout(title_bar)
+        tb.setContentsMargins(2, 0, 4, 0)
+        tb.setSpacing(4)
+        self.lbl_dlg_title = QLabel(title)
+        self.lbl_dlg_title.setObjectName("dlgTitle")
+        tb.addWidget(self.lbl_dlg_title)
+        tb.addStretch(1)
+        self.btn_dlg_close = QPushButton("✕")
+        self.btn_dlg_close.setObjectName("dlgClose")
+        self.btn_dlg_close.setFixedSize(26, 22)
+        self.btn_dlg_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_dlg_close.setToolTip("关闭")
+        self.btn_dlg_close.clicked.connect(self.reject)
+        tb.addWidget(self.btn_dlg_close)
+        cvb.addWidget(title_bar)
+
+        self.body = QWidget()
+        self.body.setObjectName("dlgBody")
+        self.body.setStyleSheet("QWidget#dlgBody { background: transparent; }")
+        self.body_lay = QVBoxLayout(self.body)
+        self.body_lay.setContentsMargins(0, 2, 0, 0)
+        self.body_lay.setSpacing(8)
+        cvb.addWidget(self.body, 1)
+
+        # 标题条拖动
+        self.card.mousePressEvent = self._nf_press
+        self.card.mouseMoveEvent = self._nf_move
+        self.card.mouseReleaseEvent = self._nf_release
+        self.setMinimumWidth(width)
+
+    def _nf_press(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
+            self._drag_off = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        else:
+            self._drag_off = None
+
+    def _nf_move(self, e):
+        off = self._drag_off
+        if off is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.move(e.globalPosition().toPoint() - off)
+
+    def _nf_release(self, e):
+        self._drag_off = None
+
+    def exec(self):
+        return super().exec()
+
+    def _center_on(self, parent):
+        """有父窗口时居中显示。"""
+        if parent is not None:
+            try:
+                pg = parent.frameGeometry()
+                self.adjustSize()
+                self.move(pg.center().x() - self.width() // 2,
+                          pg.center().y() - self.height() // 2)
+            except Exception:
+                pass
+
+
+class NfMessage(NfDialog):
+    """无边框消息框：info / warn / confirm。"""
+
+    ICONS = {"info": "ℹ️", "warn": "⚠️", "question": "❓"}
+
+    def __init__(self, parent, title, text, kind="info", rich_text=False):
+        super().__init__(title, parent, width=440)
+        self._result = "ok"
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        icon = QLabel(self.ICONS.get(kind, "ℹ️"))
+        icon.setStyleSheet("font-size: 26px; background: transparent;")
+        row.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.lbl = QLabel(text)
+        self.lbl.setObjectName("dlgText")
+        self.lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl.setWordWrap(True)
+        row.addWidget(self.lbl, 1)
+        self.body_lay.addLayout(row)
+        self.body_lay.addStretch(1)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        btns.addStretch(1)
+        if kind == "question":
+            self.btn_no = QPushButton("取消")
+            self.btn_no.setObjectName("dlgBtnCancel")
+            self.btn_no.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.btn_no.clicked.connect(self._on_no)
+            btns.addWidget(self.btn_no)
+            self.btn_yes = QPushButton("确定")
+            self.btn_yes.setObjectName("dlgBtnOK")
+            self.btn_yes.setDefault(True)
+            self.btn_yes.clicked.connect(self._on_yes)
+            btns.addWidget(self.btn_yes)
+            self._result = "no"
+        else:
+            self.btn_ok = QPushButton("确定")
+            self.btn_ok.setObjectName("dlgBtnOK")
+            self.btn_ok.setDefault(True)
+            self.btn_ok.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.btn_ok.clicked.connect(self.accept)
+            btns.addWidget(self.btn_ok)
+        self.body_lay.addLayout(btns)
+        self._center_on(parent)
+
+    def _on_yes(self):
+        self._result = "yes"
+        self.accept()
+
+    def _on_no(self):
+        self._result = "no"
+        self.reject()
+
+    @staticmethod
+    def info(parent, title, text):
+        d = NfMessage(parent, title, text, "info")
+        d.exec()
+
+    @staticmethod
+    def warn(parent, title, text):
+        d = NfMessage(parent, title, text, "warn")
+        d.exec()
+
+    @staticmethod
+    def confirm(parent, title, text, yes_text="确定", no_text="取消") -> bool:
+        d = NfMessage(parent, title, text, "question")
+        d.btn_yes.setText(yes_text)
+        d.btn_no.setText(no_text)
+        d.exec()
+        return d._result == "yes"
+
+
+class NfInput(NfDialog):
+    """无边框单行输入框（替代 QInputDialog.getText）。"""
+
+    def __init__(self, parent, title, label, default="", width=440):
+        super().__init__(title, parent, width=width)
+        self.lbl = QLabel(label)
+        self.lbl.setObjectName("dlgText")
+        self.body_lay.addWidget(self.lbl)
+        self.edit = QLineEdit(default)
+        self.body_lay.addWidget(self.edit)
+        self.body_lay.addStretch(1)
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        btns.addStretch(1)
+        b_cancel = QPushButton("取消")
+        b_cancel.setObjectName("dlgBtnCancel")
+        b_cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b_cancel.clicked.connect(self.reject)
+        btns.addWidget(b_cancel)
+        b_ok = QPushButton("确定")
+        b_ok.setObjectName("dlgBtnOK")
+        b_ok.setDefault(True)
+        b_ok.clicked.connect(self.accept)
+        btns.addWidget(b_ok)
+        self.body_lay.addLayout(btns)
+        self.edit.setFocus()
+        self._center_on(parent)
+
+    @staticmethod
+    def get_text(parent, title, label, default="", width=440):
+        d = NfInput(parent, title, label, default, width=width)
+        if d.exec():
+            return d.edit.text().strip(), True
+        return "", False
+
+
+# ---------------------------------------------------------------------------
 # 9. 配置对话框
 # ---------------------------------------------------------------------------
 
-class ConfigDialog(QDialog):
-    """配置输入对话框。"""
+class ConfigDialog(NfDialog):
+    """配置输入对话框（2026-09-07：无边框圆角卡片，与主窗风格统一）。"""
 
     def __init__(self, config: ConfigManager, parent=None):
-        super().__init__(parent)
+        super().__init__("配置", parent, width=580)
         self.config = config
-        self.setWindowTitle("配置 - 智能会议纪要工具")
-        self.setMinimumWidth(560)
         self._build_ui()
         self._load_values()
+        self._center_on(parent)
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        layout = self.body_lay  # 内容装入无边框卡片 body
         form = QFormLayout()
 
         self.api_key_edit = QLineEdit()
@@ -636,8 +835,12 @@ class ConfigDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("保存")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        _b_ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        _b_ok.setText("保存")
+        _b_ok.setObjectName("dlgBtnOK")
+        _b_cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        _b_cancel.setText("取消")
+        _b_cancel.setObjectName("dlgBtnCancel")
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -672,7 +875,7 @@ class ConfigDialog(QDialog):
     def _on_accept(self):
         key = self.api_key_edit.text().strip()
         if not key:
-            QMessageBox.warning(self, "提示", "API Key 不能为空。")
+            NfMessage.warn(self, "提示", "API Key 不能为空。")
             return
         self.config.set("deepseek_api_key", key)
         self.config.set("deepseek_base_url", self.base_url_edit.text().strip())
@@ -910,7 +1113,7 @@ class MainWindow(QMainWindow):
         logger.info("[按钮] 点击「加载模型」")
         status = self._check_model_status()
         if status.startswith("⚠️"):
-            QMessageBox.warning(
+            NfMessage.warn(
                 self, "模型未就绪",
                 f"{status}\n\n请先在「⚙️ 配置」中检查模型目录，或确认模型文件完整。",
             )
@@ -1282,7 +1485,7 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(status)
 
     def _show_first_run_dialog(self):
-        QMessageBox.information(
+        NfMessage.info(
             self, "欢迎使用",
             "欢迎使用智能会议纪要工具！\n\n"
             "首次使用请先配置 DeepSeek API Key（用于生成会议纪要）。\n"
@@ -1427,8 +1630,8 @@ class MainWindow(QMainWindow):
         act_delete = menu.addAction("🗑 删除记录")
         act = menu.exec(self.hist_list.viewport().mapToGlobal(pos))
         if act == act_rename:
-            new_title, ok = QInputDialog.getText(
-                self, "重命名记录", "新名称：", text=rec.get("title", "")
+            new_title, ok = NfInput.get_text(
+                self, "重命名记录", "新名称：", default=rec.get("title", "")
             )
             if ok and new_title.strip():
                 self.store.rename(rid, new_title.strip())
@@ -1438,12 +1641,10 @@ class MainWindow(QMainWindow):
                     self.lbl_status.setText(f"已重命名为：{new_title.strip()}")
                 logger.info(f"重命名记录: {rid} -> {new_title.strip()}")
         elif act == act_delete:
-            ret = QMessageBox.question(
-                self, "删除记录",
-                f"确定删除记录「{rec.get('title', rid)}」？\n将删除其音频、转写与纪要文件。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if ret == QMessageBox.StandardButton.Yes:
+            if NfMessage.confirm(
+                    self, "删除记录",
+                    f"确定删除记录「{rec.get('title', rid)}」？\n将删除其音频、转写与纪要文件。",
+                    yes_text="删除", no_text="取消"):
                 was_current = (self.current_record_id == rid)
                 self.store.delete(rid)
                 self._refresh_hist_list()
@@ -1602,10 +1803,10 @@ class MainWindow(QMainWindow):
         if result is None:
             return
         cur_name = result.speakers.get(spk, f"说话人{spk}")
-        name, ok = QInputDialog.getText(
+        name, ok = NfInput.get_text(
             self, "重命名说话人",
             f"为「{cur_name}」输入新名称（其全部 {self._speaker_count(result, spk)} 句将统一更新）：",
-            text=cur_name,
+            default=cur_name,
         )
         if not ok:
             return
@@ -1628,12 +1829,9 @@ class MainWindow(QMainWindow):
         if self._is_default_speaker_name(dst_name, dst) and not self._is_default_speaker_name(src_name, src):
             tip += f"\n\n检测到「{src_name}」是自定义名称，合并后将沿用该名称。"
         tip += "\n\n此操作会改写转写结果（不可撤销，重新转写可复原）。是否继续？"
-        ret = QMessageBox.question(
-            self, "合并说话人", tip,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not NfMessage.confirm(
+                self, "合并说话人", tip,
+                yes_text="合并", no_text="取消"):
             return
         for s in result.sentences:
             if s.get("speaker") == src:
@@ -1992,7 +2190,7 @@ class MainWindow(QMainWindow):
         if self.store is None:
             return
         if not self.current_audio or not Path(self.current_audio).exists():
-            QMessageBox.information(self, "提示", "当前没有可归档的音频。\n请先录音或导入音频。")
+            NfMessage.info(self, "提示", "当前没有可归档的音频。\n请先录音或导入音频。")
             return
         src = self.current_audio
         try:
@@ -2021,7 +2219,7 @@ class MainWindow(QMainWindow):
             logger.info(f"手动新建记录: {rid} src={src}")
         except Exception as e:
             logger.error(f"新建记录失败: {e}")
-            QMessageBox.warning(self, "新建失败", str(e))
+            NfMessage.warn(self, "新建失败", str(e))
 
     def _auto_archive(self, wav_path: str, source: str = "recorded", title: str = ""):
         """录音/导入完成后自动归档为一条历史记录。
@@ -2069,7 +2267,7 @@ class MainWindow(QMainWindow):
     def on_record_clicked(self):
         logger.info("[按钮] 点击「开始录音」")
         if not PYAUDIO_OK:
-            QMessageBox.warning(self, "提示", "pyaudio 未安装，无法录音。请导入音频文件代替。")
+            NfMessage.warn(self, "提示", "pyaudio 未安装，无法录音。请导入音频文件代替。")
             return
         if self.recorder is not None and self.recorder.isRunning():
             logger.warning("录音已在进行中")
@@ -2115,7 +2313,7 @@ class MainWindow(QMainWindow):
         if self.recording_timer:
             self.recording_timer.stop()
         self.lbl_status.setText("录音失败")
-        QMessageBox.warning(self, "录音失败", f"录音出错：\n{msg}\n\n请检查麦克风设备。")
+        NfMessage.warn(self, "录音失败", f"录音出错：\n{msg}\n\n请检查麦克风设备。")
 
     def on_stop_clicked(self):
         logger.info("[按钮] 点击「停止录音」")
@@ -2126,12 +2324,12 @@ class MainWindow(QMainWindow):
     # ---------- 事件：导入 ----------
     def on_import_clicked(self):
         logger.info("[按钮] 点击「导入文件」")
-        fpath, _ = QFileDialog.getOpenFileName(
-            self, "选择音频文件", "",
-            "音频文件 (*.wav *.mp3 *.m4a *.flac);;所有文件 (*.*)",
-        )
-        if not fpath:
+        fd = QFileDialog(self, "选择音频文件", "")
+        fd.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        fd.setNameFilter("音频文件 (*.wav *.mp3 *.m4a *.flac);;所有文件 (*.*)")
+        if fd.exec() != QFileDialog.DialogCode.Accepted or not fd.selectedFiles():
             return
+        fpath = fd.selectedFiles()[0]
         logger.info(f"导入文件: {fpath}")
         try:
             converted = convert_to_wav_16k(fpath)
@@ -2144,7 +2342,7 @@ class MainWindow(QMainWindow):
             self._auto_archive(converted, source="imported", title=Path(fpath).stem)
         except Exception as e:
             logger.error(f"导入失败: {e}")
-            QMessageBox.warning(self, "导入失败", str(e))
+            NfMessage.warn(self, "导入失败", str(e))
 
     def _update_audio_duration(self, path):
         try:
@@ -2163,7 +2361,7 @@ class MainWindow(QMainWindow):
     def on_transcribe_clicked(self):
         logger.info("[按钮] 点击「开始转写」")
         if not self.current_audio:
-            QMessageBox.warning(self, "提示", "请先录音或导入音频文件。")
+            NfMessage.warn(self, "提示", "请先录音或导入音频文件。")
             return
         if self.transcriber is not None and self.transcriber.isRunning():
             logger.warning("转写已在进行中")
@@ -2231,7 +2429,7 @@ class MainWindow(QMainWindow):
         self._pending_result_obj = None
         self._set_busy(False)
         self.txt_transcript.setPlainText(f"[转写失败] {msg}")
-        QMessageBox.warning(
+        NfMessage.warn(
             self, "转写失败",
             f"转写出错：\n{msg}\n\n请检查模型目录是否正确、显卡驱动是否正常。",
         )
@@ -2241,7 +2439,7 @@ class MainWindow(QMainWindow):
         logger.info("[按钮] 点击「生成纪要」")
         transcript = self.current_transcript or self.txt_transcript.toPlainText().strip()
         if not transcript or transcript.startswith("[转写失败]"):
-            QMessageBox.warning(self, "提示", "请先完成转写。")
+            NfMessage.warn(self, "提示", "请先完成转写。")
             return
         api_key = self.config.get("deepseek_api_key", "")
         if not api_key:
@@ -2283,30 +2481,32 @@ class MainWindow(QMainWindow):
         logger.error(f"总结错误: {msg}")
         self._set_busy(False)
         self.txt_summary.setPlainText(f"[总结失败] {msg}")
-        QMessageBox.warning(self, "总结失败", f"生成纪要出错：\n{msg}\n\n请检查 API Key 与网络。")
+        NfMessage.warn(self, "总结失败", f"生成纪要出错：\n{msg}\n\n请检查 API Key 与网络。")
 
     # ---------- 事件：导出 ----------
     def on_export_clicked(self):
         logger.info("[按钮] 点击「导出纪要」")
         summary = self.txt_summary.toPlainText().strip()
         if not summary or summary.startswith("[总结失败]"):
-            QMessageBox.warning(self, "提示", "没有可导出的纪要内容。")
+            NfMessage.warn(self, "提示", "没有可导出的纪要内容。")
             return
         default_name = f"会议纪要_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        fpath, _ = QFileDialog.getSaveFileName(
-            self, "导出会议纪要", default_name, "文本文件 (*.txt)",
-        )
-        if not fpath:
+        fd = QFileDialog(self, "导出会议纪要", default_name)
+        fd.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        fd.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        fd.setNameFilter("文本文件 (*.txt)")
+        if fd.exec() != QFileDialog.DialogCode.Accepted or not fd.selectedFiles():
             return
+        fpath = fd.selectedFiles()[0]
         try:
             with open(fpath, "w", encoding="utf-8") as f:
                 f.write(summary)
             logger.info(f"纪要已导出: {fpath}")
             self.lbl_status.setText(f"已导出: {fpath}")
-            QMessageBox.information(self, "导出成功", f"会议纪要已保存到：\n{fpath}")
+            NfMessage.info(self, "导出成功", f"会议纪要已保存到：\n{fpath}")
         except Exception as e:
             logger.error(f"导出失败: {e}")
-            QMessageBox.warning(self, "导出失败", str(e))
+            NfMessage.warn(self, "导出失败", str(e))
 
     # ---------- 事件：配置 ----------
     def on_config_clicked(self):

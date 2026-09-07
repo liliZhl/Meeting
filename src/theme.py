@@ -99,6 +99,69 @@ QWidget#appRoot {{
     background-color: {c['bg']};
     border-radius: 14px;
 }}
+/* 无边框弹窗统一卡片（2026-09-07：弹窗全部无边框圆角） */
+QDialog#nfDlg {{
+    background-color: transparent;
+}}
+QWidget#dlgCard {{
+    background-color: {c['panel']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QLabel#dlgTitle {{
+    color: {c['text']};
+    font-size: 15px;
+    font-weight: bold;
+    background: transparent;
+    padding: 4px 0 0 2px;
+}}
+QWidget#dlgTitleBar {{
+    background: transparent;
+}}
+QPushButton#dlgClose {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: {c['text_dim']};
+    font-size: 14px;
+    min-width: 26px;
+    min-height: 22px;
+    padding: 0; margin: 0;
+}}
+QPushButton#dlgClose:hover {{
+    background-color: {c['danger']};
+    color: #ffffff;
+}}
+/* 消息/输入弹窗文本 */
+QLabel#dlgText {{
+    color: {c['text']};
+    font-size: 13px;
+    background: transparent;
+}}
+QPushButton#dlgBtnOK {{
+    background-color: {c['accent']};
+    color: #ffffff;
+    border: 1px solid {c['accent']};
+    border-radius: 8px;
+    padding: 5px 20px;
+}}
+QPushButton#dlgBtnOK:hover {{ background-color: {c['accent_hover']}; }}
+QPushButton#dlgBtnCancel {{
+    background-color: {c['panel']};
+    color: {c['text']};
+    border: 1px solid {c['border']};
+    border-radius: 8px;
+    padding: 5px 20px;
+}}
+QPushButton#dlgBtnCancel:hover {{ background-color: {c['panel_hover']}; border-color: {c['accent']}; }}
+QPushButton#dlgBtnDanger {{
+    background-color: {c['danger']};
+    color: #ffffff;
+    border: 1px solid {c['danger']};
+    border-radius: 8px;
+    padding: 5px 20px;
+}}
+QPushButton#dlgBtnDanger:hover {{ background-color: {c['danger']}; }}
 /* 无边框标题栏（透明，作为拖动区） */
 QWidget#titleBar {{ background: transparent; }}
 QPushButton#btnWinMin, QPushButton#btnWinMax, QPushButton#btnWinClose {{
