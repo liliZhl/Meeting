@@ -182,7 +182,30 @@ except ImportError:
     OpenAI = None
     logger.warning("openai 库未安装，总结功能不可用")
 
-FFMPEG_AVAILABLE = FFMPEG_PATH.exists()
+def _locate_ffmpeg():
+    """多级定位 ffmpeg.exe（2026-09-07 修复：开发目录无 bin/ 时导入 mp3 必失败）。
+
+    候选顺序：打包/应用 bin → 可执行文件旁 bin → 系统 PATH。
+    返回可执行文件绝对路径或 None（None 时 mp3/m4a/flac 转换受限，pydub 仍可能自行找到系统 ffmpeg）。
+    """
+    cands = [
+        FFMPEG_PATH,                                              # APP_DIR/bin/ffmpeg.exe
+        Path(sys.executable).parent / "bin" / "ffmpeg.exe",       # frozen 时 EXE 旁 bin
+    ]
+    for p in cands:
+        try:
+            if p.exists():
+                return str(p)
+        except Exception:
+            pass
+    w = shutil.which("ffmpeg")
+    return w
+
+
+FFMPEG_EXE = _locate_ffmpeg()
+FFMPEG_AVAILABLE = FFMPEG_EXE is not None
+if not FFMPEG_AVAILABLE:
+    logger.warning("未定位到 ffmpeg.exe：mp3/m4a/flac 导入转换将受限（可把 ffmpeg.exe 放到 bin/ 或加入 PATH）")
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +316,10 @@ def convert_to_wav_16k(input_path: str) -> str:
 
     if PYDUB_OK:
         try:
-            if FFMPEG_PATH.exists():
-                AudioSegment.converter = str(FFMPEG_PATH)
-                AudioSegment.ffmpeg = str(FFMPEG_PATH)
-                AudioSegment.ffprobe = str(FFMPEG_PATH)
+            if FFMPEG_EXE:
+                AudioSegment.converter = FFMPEG_EXE
+                AudioSegment.ffmpeg = FFMPEG_EXE
+                AudioSegment.ffprobe = FFMPEG_EXE
             audio = AudioSegment.from_file(str(src))
             audio = audio.set_frame_rate(16000).set_channels(1)
             tmp = Path(tempfile.gettempdir()) / f"meeting_conv_{int(time.time()*1000)}.wav"
@@ -309,7 +332,7 @@ def convert_to_wav_16k(input_path: str) -> str:
     if FFMPEG_AVAILABLE:
         try:
             tmp = Path(tempfile.gettempdir()) / f"meeting_conv_{int(time.time()*1000)}.wav"
-            cmd = [str(FFMPEG_PATH), "-y", "-i", str(src),
+            cmd = [FFMPEG_EXE, "-y", "-i", str(src),
                    "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(tmp)]
             logger.info(f"执行 ffmpeg: {' '.join(cmd)}")
             subprocess.run(cmd, check=True, capture_output=True)
@@ -770,6 +793,7 @@ class MainWindow(QMainWindow):
         self._play_stop_ticks = 0          # 连续 tick 报 stopped 计数（防加载期误判）
         self._pending_seek_ms = None       # 媒体未就绪时的时间戳跳转缓存（加载完成后执行）
         self._seek_guard_until = 0.0       # 刚 seek 后的防回刷截止时刻（monotonic）
+        self._drag_off = None              # 无边框窗口拖动偏移（按下时记录）
         # 空格键 = 播放/暂停（应用级事件过滤器，见 eventFilter；文本输入/浏览控件放行）
         app_inst = QApplication.instance()
         if app_inst is not None:
@@ -960,21 +984,55 @@ class MainWindow(QMainWindow):
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
+        # 无边框 + 透明背景：整窗圆角由 QWidget#appRoot 承载（2026-09-07 用户需求：去顶部标题、整窗圆角）
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # 窗口标题保留给任务栏 / Alt+Tab 识别（无边框后不可见，不占用界面）
         self.setWindowTitle("智能会议纪要工具")
         self.resize(1100, 760)
 
         central = QWidget()
+        central.setObjectName("appRoot")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 0, 14, 14)
+        root.setSpacing(6)
 
-        # 标题
-        title = QLabel("智能会议纪要工具")
-        title.setObjectName("titleLabel")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 20px; font-weight: bold; padding: 4px;")
-        root.addWidget(title)
+        # 无边框窗口标题栏：无文字，仅拖动区 + 最小化/最大化/关闭（2026-09-07 去顶部大字）
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("titleBar")
+        self.title_bar.setFixedHeight(30)
+        tb_lay = QHBoxLayout(self.title_bar)
+        tb_lay.setContentsMargins(10, 0, 6, 0)
+        tb_lay.setSpacing(2)
+        tb_lay.addStretch(1)
+        self.btn_win_min = QPushButton("─")
+        self.btn_win_min.setObjectName("btnWinMin")
+        self.btn_win_min.setFixedSize(34, 24)
+        self.btn_win_min.setToolTip("最小化")
+        self.btn_win_min.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_win_min.clicked.connect(self.showMinimized)
+        tb_lay.addWidget(self.btn_win_min)
+        self.btn_win_max = QPushButton("□")
+        self.btn_win_max.setObjectName("btnWinMax")
+        self.btn_win_max.setFixedSize(34, 24)
+        self.btn_win_max.setToolTip("最大化/还原")
+        self.btn_win_max.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_win_max.clicked.connect(self._toggle_max)
+        tb_lay.addWidget(self.btn_win_max)
+        self.btn_win_close = QPushButton("✕")
+        self.btn_win_close.setObjectName("btnWinClose")
+        self.btn_win_close.setFixedSize(38, 24)
+        self.btn_win_close.setToolTip("关闭")
+        self.btn_win_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_win_close.clicked.connect(self.close)
+        tb_lay.addWidget(self.btn_win_close)
+        # 标题栏拖动 / 双击最大化
+        self.title_bar.mousePressEvent = self._titlebar_press
+        self.title_bar.mouseMoveEvent = self._titlebar_move
+        self.title_bar.mouseReleaseEvent = self._titlebar_release
+        self.title_bar.mouseDoubleClickEvent = self._titlebar_dblclick
+        root.addWidget(self.title_bar)
 
         # 工具栏
         toolbar = QHBoxLayout()
@@ -1148,12 +1206,17 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         root.addWidget(self.progress)
 
-        # 状态栏
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
+        # 状态栏：普通圆角容器（替代 QStatusBar，配合无边框+圆角布局，2026-09-07）
+        self.status_bar = QWidget()
+        self.status_bar.setObjectName("statusBar")
+        self.status_bar.setFixedHeight(30)
+        sb_lay = QHBoxLayout(self.status_bar)
+        sb_lay.setContentsMargins(10, 3, 10, 3)
         self.lbl_status = QLabel("就绪")
         self.lbl_status.setObjectName("lblStatus")
-        self.statusBar.addWidget(self.lbl_status)
+        sb_lay.addWidget(self.lbl_status)
+        sb_lay.addStretch(1)
+        root.addWidget(self.status_bar)
 
         # 信号连接
         self.btn_record.clicked.connect(self.on_record_clicked)
@@ -2251,6 +2314,37 @@ class MainWindow(QMainWindow):
             self.btn_load_model.setEnabled(not busy)
         if busy:
             self.lbl_status.setText(text)
+
+    # ---------- 无边框窗口：拖动 / 双击最大化 / 按钮（2026-09-07） ----------
+    def _titlebar_press(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
+            self._drag_off = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        else:
+            self._drag_off = None
+
+    def _titlebar_move(self, e):
+        off = self._drag_off
+        if off is not None and (e.buttons() & Qt.MouseButton.LeftButton) and not self.isMaximized():
+            self.move(e.globalPosition().toPoint() - off)
+
+    def _titlebar_release(self, e):
+        self._drag_off = None
+
+    def _titlebar_dblclick(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._toggle_max()
+
+    def _toggle_max(self):
+        """最大化/还原切换（自绘标题栏按钮用）。"""
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self._sync_max_icon()
+
+    def _sync_max_icon(self):
+        if getattr(self, "btn_win_max", None) is not None:
+            self.btn_win_max.setText("❐" if self.isMaximized() else "□")
 
     def _apply_theme(self, rerender: bool = True):
         """应用主题（阶段 E：样式全部来自 theme.py）。

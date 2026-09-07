@@ -87,23 +87,46 @@ QWidget {{
     font-family: 'Microsoft YaHei', 'Segoe UI';
     font-size: 13px;
 }}
-QMainWindow, QDialog, QMessageBox, QInputDialog {{
+/* 主窗口无边框（2026-09-07）：QMainWindow 透明，圆角由 #appRoot 承载 */
+QMainWindow {{
+    background-color: transparent;
+}}
+QDialog, QMessageBox, QInputDialog {{
     background-color: {c['bg']};
+}}
+/* 主窗口圆角卡片 */
+QWidget#appRoot {{
+    background-color: {c['bg']};
+    border-radius: 14px;
+}}
+/* 无边框标题栏（透明，作为拖动区） */
+QWidget#titleBar {{ background: transparent; }}
+QPushButton#btnWinMin, QPushButton#btnWinMax, QPushButton#btnWinClose {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: {c['text_dim']};
+    font-size: 13px;
+    padding: 0; margin: 0;
+}}
+QPushButton#btnWinMin:hover, QPushButton#btnWinMax:hover {{
+    background-color: {c['panel_hover']};
+    color: {c['text']};
+}}
+QPushButton#btnWinClose:hover {{
+    background-color: {c['danger']};
+    color: #ffffff;
 }}
 QToolTip {{
     background-color: {c['panel']};
     color: {c['text']};
     border: 1px solid {c['border']};
     padding: 4px 6px;
-    border-radius: 4px;
+    border-radius: 6px;
 }}
 
 /* ===== 标签 ===== */
 QLabel {{ color: {c['text']}; background: transparent; }}
-QLabel#titleLabel {{
-    font-size: 20px; font-weight: bold; color: {c['accent']};
-    padding: 2px 0 6px 0; background: transparent;
-}}
 QLabel#histTitle {{
     font-weight: bold; color: {c['text']}; padding: 4px 2px; background: transparent;
 }}
@@ -117,7 +140,7 @@ QPushButton {{
     background-color: {c['panel']};
     color: {c['text']};
     border: 1px solid {c['border']};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 6px 16px;
     min-height: 18px;
 }}
@@ -169,7 +192,7 @@ QLineEdit, QPlainTextEdit, QTextBrowser, QTextEdit {{
     background-color: {c['input']};
     color: {c['text']};
     border: 1px solid {c['border']};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 6px;
     selection-background-color: {c['sel_bg']};
     selection-color: {c['sel_text']};
@@ -184,14 +207,14 @@ QLineEdit:focus, QPlainTextEdit:focus, QTextBrowser:focus {{
 }}
 QComboBox {{
     background-color: {c['input']}; color: {c['text']};
-    border: 1px solid {c['border']}; border-radius: 6px;
+    border: 1px solid {c['border']}; border-radius: 8px;
     padding: 5px 8px; min-height: 18px;
 }}
 QComboBox:hover {{ border-color: {c['accent']}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox QAbstractItemView {{
     background-color: {c['panel']}; color: {c['text']};
-    border: 1px solid {c['border']}; border-radius: 4px;
+    border: 1px solid {c['border']}; border-radius: 6px;
     selection-background-color: {c['sel_bg']}; selection-color: {c['sel_text']};
 }}
 
@@ -199,12 +222,12 @@ QComboBox QAbstractItemView {{
 QListWidget {{
     background-color: {c['panel']};
     border: 1px solid {c['border']};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 4px;
     outline: none;
 }}
 QListWidget::item {{
-    padding: 7px 8px; border-radius: 4px; margin: 1px 0;
+    padding: 7px 8px; border-radius: 6px; margin: 1px 0;
 }}
 QListWidget::item:hover {{ background-color: {c['panel_hover']}; }}
 QListWidget::item:selected {{ background-color: {c['sel_bg']}; color: {c['sel_text']}; }}
@@ -213,7 +236,7 @@ QListWidget::item:selected {{ background-color: {c['sel_bg']}; color: {c['sel_te
 QWidget#histPanel, QWidget#playBar {{
     background-color: {c['panel']};
     border: 1px solid {c['border']};
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 QWidget#playBar {{ padding: 2px; }}
 
@@ -221,7 +244,7 @@ QWidget#playBar {{ padding: 2px; }}
 QSplitter::handle {{ background-color: {c['border']}; }}
 QSplitter::handle:hover {{ background-color: {c['accent']}; }}
 
-/* ===== 播放进度滑块 ===== */
+/* ===== 播放进度滑块（2026-09-07：圆钮视觉全透明，保留可抓热区） ===== */
 QSlider::groove:horizontal {{
     height: 6px; background: {c['border']}; border-radius: 3px;
 }}
@@ -232,11 +255,12 @@ QSlider::add-page:horizontal {{
     background: {c['border']}; border-radius: 3px;
 }}
 QSlider::handle:horizontal {{
-    width: 14px; margin: -5px 0; background: {c['accent']};
-    border: 1px solid {c['accent']}; border-radius: 7px;
+    width: 14px; margin: -5px 0;
+    background: transparent;
+    border: 1px solid transparent; border-radius: 7px;
 }}
-QSlider::handle:horizontal:hover {{ background: {c['accent_hover']}; }}
-QSlider::handle:horizontal:disabled {{ background: {c['border']}; }}
+QSlider::handle:horizontal:hover {{ background: transparent; }}
+QSlider::handle:horizontal:disabled {{ background: transparent; }}
 
 /* ===== 进度条 ===== */
 QProgressBar {{
@@ -245,19 +269,21 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background-color: {c['accent']}; border-radius: 5px; }}
 
-/* ===== 状态栏 ===== */
-QStatusBar {{
-    background-color: {c['panel']}; color: {c['text_dim']};
-    border-top: 1px solid {c['border']};
+/* ===== 状态栏（无边框后为普通圆角容器） ===== */
+QWidget#statusBar {{
+    background-color: {c['panel']};
+    border: 1px solid {c['border']};
+    border-radius: 9px;
 }}
-QStatusBar QLabel {{ color: {c['text_dim']}; background: transparent; }}
+QWidget#statusBar QLabel {{ color: {c['text_dim']}; background: transparent; }}
+QWidget#statusBar QLabel#lblStatus {{ color: {c['text']}; }}
 
 /* ===== 菜单 ===== */
 QMenu {{
     background-color: {c['panel']}; color: {c['text']};
-    border: 1px solid {c['border']}; border-radius: 6px; padding: 4px;
+    border: 1px solid {c['border']}; border-radius: 8px; padding: 4px;
 }}
-QMenu::item {{ padding: 6px 22px 6px 12px; border-radius: 4px; }}
+QMenu::item {{ padding: 6px 22px 6px 12px; border-radius: 6px; }}
 QMenu::item:selected {{ background-color: {c['sel_bg']}; color: {c['sel_text']}; }}
 QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 8px; }}
 
@@ -408,7 +434,7 @@ QListWidget::item:selected {
     color: #ffffff; border: 1px solid #3d6ddb;
 }
 
-/* ===== 播放进度滑块（内凹轨道 + 圆钮） ===== */
+/* ===== 播放进度滑块（内凹轨道；圆钮透明，保留可抓热区 2026-09-07） ===== */
 QSlider::groove:horizontal {
     height: 8px;
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -423,12 +449,11 @@ QSlider::sub-page:horizontal {
 QSlider::add-page:horizontal { background: transparent; }
 QSlider::handle:horizontal {
     width: 18px; margin: -6px 0;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #fbfcfe, stop:1 #e4e9f0);
-    border: 1px solid #b9c4d4; border-radius: 9px;
+    background: transparent;
+    border: 1px solid transparent; border-radius: 9px;
 }
-QSlider::handle:horizontal:hover { border-color: #4c7df0; }
-QSlider::handle:horizontal:disabled { background: #dfe4ec; border-color: #cbd3e1; }
+QSlider::handle:horizontal:hover { border-color: transparent; }
+QSlider::handle:horizontal:disabled { background: transparent; }
 
 /* ===== 其余细节柔化 ===== */
 QMenu { background-color: #e8ecf3; border: 1px solid #cdd5e2; border-radius: 10px; padding: 6px; }
