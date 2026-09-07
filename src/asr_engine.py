@@ -378,7 +378,7 @@ class ASREngine:
         wav_path = self._ensure_wav_16k(audio_path, progress_callback)
 
         if progress_callback:
-            progress_callback("转写中", f"正在识别「{Path(audio_path).name}」…")
+            progress_callback("正在识别", "")
 
         logger.info(f"开始转写: {audio_path} (实际转写文件: {wav_path}, 模型: {self.asr_model})")
         # 模型专属 generate 参数（Nano 的 llm_kwargs 抑制重复幻觉等）
@@ -414,7 +414,7 @@ class ASREngine:
             return audio_path
 
         if progress_callback:
-            progress_callback("转换音频", f"正在把「{p.name}」转成 16kHz wav…")
+            progress_callback("转换音频", "正在把音频转成 16kHz wav…")
 
         tmp = Path(tempfile.gettempdir()) / f"asr_conv_{os.getpid()}_{int(__import__('time').time()*1000)}.wav"
         cmd = [ffmpeg, "-y", "-i", str(p),

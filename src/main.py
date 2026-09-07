@@ -447,7 +447,7 @@ class TranscriptionWorker(QThread):
                 self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
             else:
                 self.progress.emit("模型已就绪，开始转写…")
-            self.progress.emit(f"正在转写「{self.audio_name}」（音频较长时可能需要几分钟）…")
+            self.progress.emit("正在转写，音频较长时可能需要几分钟…")
             result = manager.transcribe(
                 self.audio_path, progress_callback=self._on_progress,
             )
@@ -2144,8 +2144,10 @@ class MainWindow(QMainWindow):
         if self.transcriber is not None and self.transcriber.isRunning():
             logger.warning("转写已在进行中")
             return
-        self._set_busy(True, "正在转写…")
-        self.txt_transcript.setPlainText("转写中，请稍候（首次会加载模型，可能需要一点时间）…")
+        self._set_busy(True, "已开始转写，请稍候…")
+        self.txt_transcript.setPlainText(
+            "已开始转写，请稍候…（首次会自动加载语音模型，约需 1 分钟；"
+            "加载完成后自动识别，结果会显示在此处）")
         model_dir = self.config.get("model_dir", "mod")
         asr_model = self.config.get("asr_model", "fun-asr-nano")
         vad_level = self.config.get("vad_level", "medium")
