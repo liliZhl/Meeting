@@ -439,10 +439,13 @@ class TranscriptionWorker(QThread):
         self.asr_model = asr_model
         self.vad_level = vad_level
         self.num_speakers = num_speakers
+        self.started_at = 0.0      # 2026-09-08：记录开始时间（用于耗时反馈）
+        self.elapsed_s = 0.0
 
     def run(self):
         try:
             from model_manager import get_manager
+            self.started_at = time.time()
             # 单例 manager：若后台尚未加载完成则同步等待
             manager = get_manager(model_root=self.model_dir, asr_model=self.asr_model,
                                   vad_level=self.vad_level)
@@ -459,6 +462,7 @@ class TranscriptionWorker(QThread):
                 num_speakers=self.num_speakers,
             )
             logger.info("转写完成")
+            self.elapsed_s = time.time() - self.started_at
             # 结构化结果与纯文本同时发出，UI 按需取用
             self.finished_obj.emit(result)
             text = result.to_text() if hasattr(result, "to_text") else str(result)
@@ -872,7 +876,7 @@ class ConfigDialog(NfDialog):
             "识别引擎：SenseVoice（CPU 首选·口语稳）为默认；\n"
             "Fun-ASR-Nano 需 GPU/强 CPU（规范长文本质量最高）；\n"
             "Paraformer 中文+字级时间戳、CPU 较快。\n"
-            "切换后需重启应用生效（首次加载新模型需下载对应文件）。"
+            "保存后自动重置模型，点「🧠 加载模型」重新加载即生效（无需重启）。"
         )
         form.addRow("语音识别模型：", self.asr_model_combo)
 
@@ -905,9 +909,11 @@ class ConfigDialog(NfDialog):
         for _label, _val in self._spk_options:
             self.spk_combo.addItem(_label, _val)
         self.spk_combo.setToolTip(
-            "说话人数量：默认自动估计，适合 1~2 人会议。\n"
-            "3 人及以上会议建议手动指定人数，说话人聚类将按该数量拆分。\n"
-            "（需 ≥20 个语音段才会聚类；单人音频自动归为 1 人）"
+            "说话人数量：默认自动估计，适合 1~2 人。\n"
+            "3 人及以上建议手动指定人数，说话人聚类按该数量拆分。\n"
+            "模型差异：Fun-ASR-Nano/Paraformer 句子粒度较细；\n"
+            "SenseVoice 按停顿段分人（粒度为段，多人混讲易整段归一人）。\n"
+            "（需 ≥20 个语音段才会聚类；单人音频自动归 1 人）"
         )
         form.addRow("说话人数量：", self.spk_combo)
 
@@ -1133,10 +1139,16 @@ class MainWindow(QMainWindow):
         self._pending_seek_ms = None       # 媒体未就绪时的时间戳跳转缓存（加载完成后执行）
         self._seek_guard_until = 0.0       # 刚 seek 后的防回刷截止时刻（monotonic）
         self._drag_off = None              # 无边框窗口拖动偏移（按下时记录）
+        self._resize_mode = None           # 无边框窗口边缘缩放方向（2026-09-08 B6）
+        self._resize_geom0 = None          # 开始缩放时窗口几何
+        self._resize_gpos0 = None          # 开始缩放时全局坐标
         # 空格键 = 播放/暂停（应用级事件过滤器，见 eventFilter；文本输入/浏览控件放行）
         app_inst = QApplication.instance()
         if app_inst is not None:
             app_inst.installEventFilter(self)
+        # 无边框窗口边缘缩放：对 central(appRoot) 挂事件过滤（B6, 2026-09-08）
+        if self.centralWidget() is not None:
+            self.centralWidget().installEventFilter(self)
         if QT_MULTIMEDIA_OK:
             try:
                 from player import AudioPlayer
@@ -1608,10 +1620,12 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(status)
 
     def _show_first_run_dialog(self):
+        # 2026-09-08：明确可跳过（转录不需要 API Key，仅生成纪要需要）
         NfMessage.info(
             self, "欢迎使用",
             "欢迎使用智能会议纪要工具！\n\n"
-            "首次使用请先配置 DeepSeek API Key（用于生成会议纪要）。\n"
+            "首次使用请配置 DeepSeek API Key（仅用于「生成纪要」）。\n"
+            "若只想录音/导入并转写，可点右上角 ✕ 跳过，之后需要时再配置。\n"
             "语音识别模型放在程序目录的 mod/ 文件夹内。",
         )
         _old_theme = self.config.get("theme", "light")
@@ -1764,6 +1778,13 @@ class MainWindow(QMainWindow):
                     self.lbl_status.setText(f"已重命名为：{new_title.strip()}")
                 logger.info(f"重命名记录: {rid} -> {new_title.strip()}")
         elif act == act_delete:
+            # 2026-09-08 修复：正在转写/总结该记录时禁止删除（避免线程写已删目录）
+            if (self.transcriber is not None and self.transcriber.isRunning()
+                    and self.current_record_id == rid) or \
+               (self.summarizer is not None and self.summarizer.isRunning()
+                    and self.current_record_id == rid):
+                NfMessage.warn(self, "提示", "该记录正在转写/总结，请稍后再删除。")
+                return
             if NfMessage.confirm(
                     self, "删除记录",
                     f"确定删除记录「{rec.get('title', rid)}」？\n将删除其音频、转写与纪要文件。",
@@ -2057,22 +2078,48 @@ class MainWindow(QMainWindow):
         self._apply_play_position(ms)  # 立即刷新，不等 positionChanged/轮询
         self._start_highlight_timer()
 
-    def eventFilter(self, obj, ev):
-        """应用级快捷键：空格 = 播放/暂停（2026-09-07 新增）。
-
-        仅当焦点不在文本输入/浏览控件（QLineEdit/QTextEdit/QTextBrowser 等）时拦截，
-        避免抢走输入框的空格字符与转写区的空格翻页；焦点在按钮/空白处时，
-        空格即播放/暂停，符合主流播放器习惯。
-        """
-        if (ev.type() == QEvent.Type.KeyPress and not ev.isAutoRepeat()
-                and ev.key() == Qt.Key.Key_Space
-                and ev.modifiers() == Qt.KeyboardModifier.NoModifier):
+    def eventFilter(self, obj, event):
+        # ---- 无边框窗口边缘缩放（B6, 2026-09-08）----
+        if obj is self.centralWidget() and event.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
+                QEvent.Type.MouseButtonRelease):
+            et = event.type()
+            if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                hit = self._edge_hit(event.position())
+                if hit:
+                    self._resize_mode = hit
+                    self._resize_geom0 = self.geometry()
+                    self._resize_gpos0 = event.globalPosition().toPoint()
+                    return True
+            elif et == QEvent.Type.MouseMove:
+                mode = self._resize_mode or self._edge_hit(event.position())
+                curs = self._edge_cursor(mode)
+                cw = self.centralWidget()
+                if curs is not None:
+                    cw.setCursor(curs)
+                else:
+                    cw.unsetCursor()
+                if self._resize_mode:
+                    self._apply_resize(event.globalPosition().toPoint())
+                    return True
+            elif et == QEvent.Type.MouseButtonRelease:
+                if self._resize_mode:
+                    self._resize_mode = None
+                    self._resize_geom0 = None
+                    self.centralWidget().unsetCursor()
+                    return True
+        # 2026-09-08 修复：模态弹窗打开时（消息/输入/配置）不抢空格键
+        if QApplication.activeModalWidget() is not None:
+            return super().eventFilter(obj, event)
+        if (event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat()
+                and event.key() == Qt.Key.Key_Space
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
             fw = QApplication.focusWidget()
             if not isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit,
                                    QTextBrowser, QComboBox, QListWidget)):
                 self._on_play_clicked()
                 return True
-        return super().eventFilter(obj, ev)
+        return super().eventFilter(obj, event)
 
     def _on_play_clicked(self):
         logger.info("[按钮] 点击「播放」")
@@ -2463,6 +2510,15 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"已导入: {Path(fpath).name}")
             # 阶段 B：导入自动归档为一条历史记录
             self._auto_archive(converted, source="imported", title=Path(fpath).stem)
+            # 2026-09-08：归档成功后删除转换临时 wav（播放已切到 records/audio）
+            if (str(converted) != str(fpath)
+                    and Path(converted).parent == Path(tempfile.gettempdir())
+                    and Path(converted).exists()):
+                try:
+                    Path(converted).unlink()
+                    logger.debug(f"已清理导入转换临时文件: {converted}")
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"导入失败: {e}")
             NfMessage.warn(self, "导入失败", str(e))
@@ -2626,11 +2682,32 @@ class MainWindow(QMainWindow):
         if not summary or summary.startswith("[总结失败]"):
             NfMessage.warn(self, "提示", "没有可导出的纪要内容。")
             return
-        default_name = f"会议纪要_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        menu = QMenu(self)
+        act_txt = menu.addAction("导出为 TXT…")
+        act_md = menu.addAction("导出为 Markdown…")
+        act_copy = menu.addAction("复制到剪贴板")
+        if getattr(self, "btn_export", None) is not None:
+            pos = self.btn_export.mapToGlobal(self.btn_export.rect().bottomLeft())
+        else:
+            pos = self.mapToGlobal(self.rect().topLeft())
+        act = menu.exec(pos)
+        if act == act_copy:
+            QApplication.clipboard().setText(summary)
+            self.lbl_status.setText("纪要已复制到剪贴板")
+            return
+        if act == act_txt:
+            self._do_export_file(summary, ".txt", "文本文件 (*.txt)")
+        elif act == act_md:
+            self._do_export_file(summary, ".md", "Markdown 文件 (*.md)")
+
+    def _do_export_file(self, summary: str, ext: str, name_filter: str):
+        """弹出保存框并写文件（TXT/MD 共用）。"""
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        default_name = f"会议纪要_{stamp}{ext}"
         fd = QFileDialog(self, "导出会议纪要", default_name)
         fd.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         fd.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-        fd.setNameFilter("文本文件 (*.txt)")
+        fd.setNameFilter(name_filter)
         if fd.exec() != QFileDialog.DialogCode.Accepted or not fd.selectedFiles():
             return
         fpath = fd.selectedFiles()[0]
@@ -2697,6 +2774,73 @@ class MainWindow(QMainWindow):
         if e.button() == Qt.MouseButton.LeftButton:
             self._toggle_max()
 
+    # ---- 无边框窗口边缘缩放辅助（B6, 2026-09-08）----
+    _EDGE_CUR = {
+        "l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+        "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+        "tl": Qt.CursorShape.SizeFDiagCursor, "br": Qt.CursorShape.SizeFDiagCursor,
+        "tr": Qt.CursorShape.SizeBDiagCursor, "bl": Qt.CursorShape.SizeBDiagCursor,
+    }
+
+    def _edge_hit(self, pos):
+        """判断事件位置落在 central 边缘哪个方向（6px），无则 None。"""
+        cw = self.centralWidget()
+        if cw is None:
+            return None
+        x = pos.x() if not hasattr(pos, "toPoint") else pos.toPoint().x()
+        y = pos.y() if not hasattr(pos, "toPoint") else pos.toPoint().y()
+        m = 6
+        left, right = x <= m, x >= cw.width() - m
+        top, bottom = y <= m, y >= cw.height() - m
+        if left and top:
+            return "tl"
+        if right and bottom:
+            return "br"
+        if right and top:
+            return "tr"
+        if left and bottom:
+            return "bl"
+        if left:
+            return "l"
+        if right:
+            return "r"
+        if top:
+            return "t"
+        if bottom:
+            return "b"
+        return None
+
+    def _edge_cursor(self, hit):
+        return self._EDGE_CUR.get(hit)
+
+    def _apply_resize(self, gp):
+        """按缩放方向调整窗口几何（最小 960x640）。"""
+        if not self._resize_mode or self._resize_geom0 is None:
+            return
+        g = self._resize_geom0
+        dx = gp.x() - self._resize_gpos0.x()
+        dy = gp.y() - self._resize_gpos0.y()
+        mode = self._resize_mode
+        x, y, w, h = g.x(), g.y(), g.width(), g.height()
+        if "l" in mode:
+            w -= dx
+        if "r" in mode:
+            w += dx
+        if "t" in mode:
+            h -= dy
+        if "b" in mode:
+            h += dy
+        MINW, MINH = 960, 640
+        if w < MINW:
+            w = MINW
+        if h < MINH:
+            h = MINH
+        if "l" in mode:
+            x = g.x() + g.width() - w
+        if "t" in mode:
+            y = g.y() + g.height() - h
+        self.setGeometry(x, y, w, h)
+
     def _toggle_max(self):
         """最大化/还原切换（自绘标题栏按钮用）。"""
         if self.isMaximized():
@@ -2736,6 +2880,20 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent):
         logger.info("应用关闭，清理资源…")
+        # 2026-09-08 修复：转写/总结线程运行中退出会中断推理且结果不落盘
+        busy_worker = None
+        if self.transcriber is not None and self.transcriber.isRunning():
+            busy_worker = "转写"
+        elif self.summarizer is not None and self.summarizer.isRunning():
+            busy_worker = "纪要生成"
+        if busy_worker:
+            if not NfMessage.confirm(
+                    self, "任务进行中",
+                    f"「{busy_worker}」仍在进行，退出将丢失本次结果。\n确定要强制退出吗？",
+                    yes_text="强制退出", no_text="取消"):
+                event.ignore()
+                return
+            logger.warning(f"任务进行中强制退出（{busy_worker}）")
         if self.recorder is not None and self.recorder.isRunning():
             self.recorder.stop()
             self.recorder.wait(2000)

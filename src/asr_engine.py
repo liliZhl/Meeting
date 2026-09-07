@@ -381,7 +381,24 @@ class ASREngine:
 
         # 统一转成 16kHz 单声道 wav，保证加载稳定
         wav_path = self._ensure_wav_16k(audio_path, progress_callback)
+        # 2026-09-08：转换出的临时 wav 用后即删，避免 %TEMP% 累积
+        _tmp_clean = (wav_path != str(audio_path)
+                      and os.path.dirname(wav_path) == tempfile.gettempdir()
+                      and os.path.basename(wav_path).startswith("asr_conv_"))
+        try:
+            return self._transcribe_inner(wav_path, audio_path, progress_callback,
+                                          num_speakers)
+        finally:
+            if _tmp_clean:
+                try:
+                    os.remove(wav_path)
+                    logger.debug(f"已清理临时转写音频: {wav_path}")
+                except Exception:
+                    pass
 
+    def _transcribe_inner(self, wav_path, audio_path, progress_callback,
+                          num_speakers) -> TranscriptionResult:
+        """实际推理（供 transcribe 的 finally 清理临时文件）。"""
         if progress_callback:
             progress_callback("正在识别", "")
 
