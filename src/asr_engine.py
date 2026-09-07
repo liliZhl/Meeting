@@ -362,14 +362,17 @@ class ASREngine:
             self._loading = False
 
     # ---- 转写 ----
-    def transcribe(self, audio_path: str, progress_callback=None) -> TranscriptionResult:
+    def transcribe(self, audio_path: str, progress_callback=None,
+                   num_speakers: int = None) -> TranscriptionResult:
         """
         转写音频，返回结构化 TranscriptionResult（句子级时间戳 + 说话人）。
 
         会先把任意音频（mp3/m4a/flac 等）统一转成 16kHz 单声道 wav，
         避免 funasr 内部因编码/中文路径/特殊 mp3 编码加载失败。
 
-        progress_callback: 可选，接收 (step_name:str, detail:str)。
+        num_speakers: 预设说话人数（2..15）。None/<=1 = 自动估计（谱聚类默认）。
+            2026-09-07 路线C：funasr 定制版 ClusterBackend 谱聚类支持 1..15 人，
+            显式传入时强制按 N 人聚类（oracle_num），适用于 3 人+ 会议。
         """
         if self.model is None:
             self.load_model(progress_callback=progress_callback)
@@ -383,6 +386,9 @@ class ASREngine:
         logger.info(f"开始转写: {audio_path} (实际转写文件: {wav_path}, 模型: {self.asr_model})")
         # 模型专属 generate 参数（Nano 的 llm_kwargs 抑制重复幻觉等）
         gen_kwargs = dict(self._model_cfg["gen_extra"])
+        if num_speakers and num_speakers > 1:
+            gen_kwargs["preset_spk_num"] = int(num_speakers)
+            logger.info(f"说话人聚类: 预设 {num_speakers} 人（preset_spk_num）")
         res = self.model.generate(
             input=[wav_path],
             cache={},
@@ -505,8 +511,9 @@ class ASREngine:
 
 def transcribe_audio(audio_path: str, model_root: str = DEFAULT_MODEL_ROOT,
                      device: str = None, asr_model: str = None,
-                     progress_callback=None) -> TranscriptionResult:
+                     progress_callback=None, num_speakers: int = None) -> TranscriptionResult:
     """一次性转写（创建引擎 -> 加载 -> 转写），返回结构化结果。"""
     engine = ASREngine(model_root=model_root, device=device, asr_model=asr_model)
     engine.load_model(progress_callback=progress_callback)
-    return engine.transcribe(audio_path, progress_callback=progress_callback)
+    return engine.transcribe(audio_path, progress_callback=progress_callback,
+                             num_speakers=num_speakers)

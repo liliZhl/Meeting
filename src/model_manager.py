@@ -166,12 +166,13 @@ class ModelManager:
                 self._ready_event.set()
 
     # ---- 转写（复用常驻引擎） ----
-    def transcribe(self, audio_path: str, progress_callback=None):
+    def transcribe(self, audio_path: str, progress_callback=None, num_speakers: int = None):
         """
         使用常驻引擎转写（结构化结果）。
 
         若模型未就绪：阻塞等待后台加载（最多 ~600s），失败抛 RuntimeError。
         线程安全：全程持锁，避免并发转写冲突。
+        num_speakers: 预设说话人数（2..15，None=自动）。
         """
         if not self.is_ready():
             ok = self.load_sync(progress_callback=progress_callback)
@@ -182,6 +183,7 @@ class ModelManager:
                 raise RuntimeError("模型引擎不可用")
             return self._engine.transcribe(
                 audio_path, progress_callback=progress_callback,
+                num_speakers=num_speakers,
             )
 
     # ---- 重置（测试/换模型目录用） ----

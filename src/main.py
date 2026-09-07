@@ -429,13 +429,15 @@ class TranscriptionWorker(QThread):
     progress = pyqtSignal(str)    # 阶段状态文本
 
     def __init__(self, audio_path: str, model_dir: str, audio_name: str = "",
-                 asr_model: str = None, vad_level: str = None):
+                 asr_model: str = None, vad_level: str = None,
+                 num_speakers: int = None):
         super().__init__()
         self.audio_path = audio_path
         self.model_dir = model_dir
         self.audio_name = audio_name or Path(audio_path).name
         self.asr_model = asr_model
         self.vad_level = vad_level
+        self.num_speakers = num_speakers
 
     def run(self):
         try:
@@ -447,9 +449,13 @@ class TranscriptionWorker(QThread):
                 self.progress.emit("正在加载语音模型（首次约需 1 分钟，请耐心等待）…")
             else:
                 self.progress.emit("模型已就绪，开始转写…")
-            self.progress.emit("正在转写，音频较长时可能需要几分钟…")
+            if self.num_speakers and self.num_speakers > 1:
+                self.progress.emit(f"预设 {self.num_speakers} 个说话人，正在转写…")
+            else:
+                self.progress.emit("正在转写（说话人数自动估计），音频较长时可能需要几分钟…")
             result = manager.transcribe(
                 self.audio_path, progress_callback=self._on_progress,
+                num_speakers=self.num_speakers,
             )
             logger.info("转写完成")
             # 结构化结果与纯文本同时发出，UI 按需取用
@@ -601,6 +607,19 @@ class ConfigDialog(QDialog):
         )
         form.addRow("切句灵敏度：", self.vad_combo)
 
+        # 说话人数量（2026-09-07 路线C：谱聚类后端支持 1..15，3 人+ 会议建议手动预设）
+        self.spk_combo = QComboBox()
+        self._spk_options = [("自动估计（1~2 人）", 0), ("2 人", 2), ("3 人", 3),
+                             ("4 人", 4), ("5 人", 5), ("6 人", 6), ("8 人", 8)]
+        for _label, _val in self._spk_options:
+            self.spk_combo.addItem(_label, _val)
+        self.spk_combo.setToolTip(
+            "说话人数量：默认自动估计，适合 1~2 人会议。\n"
+            "3 人及以上会议建议手动指定人数，说话人聚类将按该数量拆分。\n"
+            "（需 ≥20 个语音段才会聚类；单人音频自动归为 1 人）"
+        )
+        form.addRow("说话人数量：", self.spk_combo)
+
         # 界面主题（阶段 E：深色蓝紫 / 浅色）
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("深色（蓝紫）", "dark")
@@ -642,6 +661,10 @@ class ConfigDialog(QDialog):
         cur_vad = self.config.get("vad_level", "")
         idx_vad = self._vad_keys.index(cur_vad) if cur_vad in self._vad_keys else 0
         self.vad_combo.setCurrentIndex(idx_vad)
+        # 恢复说话人数量
+        _n = int(self.config.get("num_speakers", 0) or 0)
+        _idx_spk = self.spk_combo.findData(_n)
+        self.spk_combo.setCurrentIndex(_idx_spk if _idx_spk >= 0 else 0)
         # 恢复主题选择
         idx_theme = self.theme_combo.findData(self.config.get("theme", "dark"))
         self.theme_combo.setCurrentIndex(idx_theme if idx_theme >= 0 else 0)
@@ -661,6 +684,7 @@ class ConfigDialog(QDialog):
         cur_vad = self.vad_combo.currentData()
         if cur_vad:
             self.config.set("vad_level", cur_vad)
+        self.config.set("num_speakers", int(self.spk_combo.currentData() or 0))
         cur_theme = self.theme_combo.currentData()
         if cur_theme:
             self.config.set("theme", cur_theme)
@@ -2151,10 +2175,11 @@ class MainWindow(QMainWindow):
         model_dir = self.config.get("model_dir", "mod")
         asr_model = self.config.get("asr_model", "fun-asr-nano")
         vad_level = self.config.get("vad_level", "medium")
+        num_spk = int(self.config.get("num_speakers", 0) or 0) or None  # 0=自动
         self.transcriber = TranscriptionWorker(
             audio_path=self.current_audio, model_dir=model_dir,
             audio_name=self.current_audio_name, asr_model=asr_model,
-            vad_level=vad_level,
+            vad_level=vad_level, num_speakers=num_spk,
         )
         self.transcriber.progress.connect(self._on_transcribe_progress)
         self.transcriber.finished.connect(self._on_transcribe_finished)
