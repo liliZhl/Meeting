@@ -581,8 +581,8 @@ class ConfigDialog(QDialog):
         # 界面主题（阶段 E：深色蓝紫 / 浅色）
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("深色（蓝紫）", "dark")
-        self.theme_combo.addItem("浅色", "light")
-        self.theme_combo.setToolTip("切换后立即生效。")
+        self.theme_combo.addItem("浅色（新拟态）", "light")
+        self.theme_combo.setToolTip("切换后立即生效（浅色为新拟态柔和风格）。")
         form.addRow("界面主题：", self.theme_combo)
 
         layout.addLayout(form)
@@ -1119,9 +1119,11 @@ class MainWindow(QMainWindow):
             "首次使用请先配置 DeepSeek API Key（用于生成会议纪要）。\n"
             "语音识别模型放在程序目录的 mod/ 文件夹内。",
         )
+        _old_theme = self.config.get("theme", "dark")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
-        # 配置弹窗可能修改了识别模型：重置并重新预加载
+        # 配置弹窗可能修改了主题/识别模型：主题立即生效 + 重置并重新预加载
+        self._reapply_theme_if_changed(_old_theme)
         self._restart_preload_after_config()
 
     def _restart_preload_after_config(self):
@@ -1346,7 +1348,9 @@ class MainWindow(QMainWindow):
             self.txt_transcript.setPlainText("(无转写结果)")
 
     def _fmt_ts_html(self, start_ms: int, end_ms: int, jump_ms: int) -> str:
-        """时间戳 -> 可点击 HTML。"""
+        """时间戳 -> 可点击 HTML（颜色跟随当前主题）。"""
+        pal = getattr(self, "_palette", None) or get_colors("dark")
+        ts_color = pal.get("ts", "#7aa2f7")
         s = start_ms / 1000.0
         e = end_ms / 1000.0
         h1, m1, s1 = int(s // 3600), int(s % 3600 // 60), int(s % 60)
@@ -1354,7 +1358,7 @@ class MainWindow(QMainWindow):
         t1 = f"{h1:02d}:{m1:02d}:{s1:02d}"
         t2 = f"{h2:02d}:{m2:02d}:{s2:02d}"
         return (
-            f"<a href='jump:{int(jump_ms)}' style='color:#7aa2f7; "
+            f"<a href='jump:{int(jump_ms)}' style='color:{pal.get('ts', '#7aa2f7')}; "
             f"text-decoration:none;'>[{t1}-{t2}]</a>"
         )
 
@@ -1579,25 +1583,30 @@ class MainWindow(QMainWindow):
         self._clear_highlight()
 
     def _on_slider_moved(self, pos: int):
-        """拖动进度条 -> 跳转。"""
+        """拖动进度条 -> 跳转（立即刷新位置/时间，不依赖 positionChanged）。"""
         if self.player is not None:
             self.player.seek(pos)
+            self._apply_play_position(pos)
 
-    def _on_play_position(self, ms: int):
+    def _apply_play_position(self, ms: int):
+        """统一刷新 进度条 + 时间文本 + 当前句高亮（positionChanged 与轮询 tick 共用）。"""
         if self.slider_pos is not None:
             self.slider_pos.setValue(int(ms))
-        # 更新时间显示
         if self.lbl_play_time is not None:
             d = self.player.duration() if self.player else 0
             self.lbl_play_time.setText(
                 f"{format_timestamp(ms / 1000)} / {format_timestamp(d / 1000)}"
             )
-        # 播放高亮：找当前句
         self._highlight_current_sentence(int(ms))
+
+    def _on_play_position(self, ms: int):
+        self._apply_play_position(ms)
 
     def _on_play_duration(self, ms: int):
         if self.slider_pos is not None:
             self.slider_pos.setRange(0, int(ms))
+            # 修复：时长就绪即启用进度条（此前从未 setEnabled(True)，无法拖动）
+            self.slider_pos.setEnabled(int(ms) > 0)
         if self.lbl_play_time is not None:
             self.lbl_play_time.setText(
                 f"{format_timestamp(self.player.position() / 1000)} / {format_timestamp(ms / 1000)}"
@@ -1653,8 +1662,9 @@ class MainWindow(QMainWindow):
                         self._play_state_last = "stopped"
                         self._on_play_state("stopped")
             # last==stopped 且未在播：媒体加载中或尚未真正播放，忽略以免闪 UI
+        # 兜底刷新进度条/时间：即使 positionChanged 在某些后端不触发，进度条也能跟随
         if self.player is not None:
-            self._highlight_current_sentence(self.player.position())
+            self._apply_play_position(self.player.position())
 
     # ---------- 播放高亮 ----------
     def _start_highlight_timer(self):
@@ -1737,10 +1747,13 @@ class MainWindow(QMainWindow):
             self.player.stop()
         self._play_source_path = ""
         self._play_current_idx = -1
+        self._play_state_last = "stopped"
+        self._play_stop_ticks = 0
         self._stop_highlight_timer()
         if self.slider_pos is not None:
             self.slider_pos.setRange(0, 0)
             self.slider_pos.setValue(0)
+            self.slider_pos.setEnabled(False)
         if self.lbl_play_time is not None:
             self.lbl_play_time.setText("00:00 / 00:00")
         if self.btn_play is not None:
@@ -2001,9 +2014,11 @@ class MainWindow(QMainWindow):
             return
         api_key = self.config.get("deepseek_api_key", "")
         if not api_key:
+            _old_theme = self.config.get("theme", "dark")
             dlg = ConfigDialog(self.config, self)
             if not dlg.exec():
                 return
+            self._reapply_theme_if_changed(_old_theme)   # 主题若在弹窗里改了要立即生效
             api_key = self.config.get("deepseek_api_key", "")
             if not api_key:
                 return
@@ -2074,9 +2089,8 @@ class MainWindow(QMainWindow):
         new_model = self.config.get("asr_model", old_model)
         new_dir = self.config.get("model_dir", old_dir)
         new_vad = self.config.get("vad_level", old_vad)
-        # 阶段 E：主题切换立即生效（含转写区富文本重渲染）
-        if self.config.get("theme", "dark") != old_theme:
-            self._apply_theme()
+        # 主题切换立即生效（含转写区富文本重渲染）
+        self._reapply_theme_if_changed(old_theme)
         # 若模型/目录/切句档位变了：重置 manager 并重新预加载，下次转写用新配置
         if new_model != old_model or new_dir != old_dir or new_vad != old_vad:
             logger.info(f"模型配置变更（{old_model}->{new_model}, vad {old_vad}->{new_vad}），"
@@ -2115,6 +2129,12 @@ class MainWindow(QMainWindow):
         # 转写区富文本用的是 inline 颜色，需按新配色重渲染
         if rerender and getattr(self, "_current_result_obj", None) is not None:
             self._render_sentences(self._current_result_obj, self.current_audio_name or "")
+
+    def _reapply_theme_if_changed(self, old_theme: str):
+        """配置弹窗关闭后：若主题变了立即整套应用（修复浅色/深色“切了不生效”）。"""
+        if self.config.get("theme", "dark") != old_theme:
+            logger.info(f"主题变更 {old_theme} -> {self.config.get('theme')}，立即应用")
+            self._apply_theme()
 
     def closeEvent(self, event: QCloseEvent):
         logger.info("应用关闭，清理资源…")

@@ -39,26 +39,28 @@ DARK = {
     "highlight": "255,200,60,70",   # 播放高亮 rgba
 }
 
+# 浅色 = 新拟态（Neumorphism 近似，2026-09-07）
+# QSS 无 box-shadow，真双层投影做不了，采用「同底色 + 双色渐变描边模拟凹凸 + 大圆角」近似。
 LIGHT = {
-    "bg": "#f4f5fa",
-    "panel": "#ffffff",
-    "panel_hover": "#eceefb",
-    "input": "#ffffff",
-    "text": "#2a2f4a",
-    "text_dim": "#6b7093",
-    "accent": "#3d6ddb",
-    "accent_hover": "#5a86e8",
-    "accent_pressed": "#2f57b0",
-    "success": "#3f9e52",
-    "danger": "#d94a5f",
-    "warn": "#b8801a",
-    "border": "#d7dae8",
-    "sel_bg": "#d9e2fb",
-    "sel_text": "#1a1b26",
-    "scroll_handle": "#c2c8e0",
+    "bg": "#e2e7ee",          # 主背景（新拟态米灰底）
+    "panel": "#e8ecf3",       # 面板背景（接近底色，靠渐变/描边区分层次）
+    "panel_hover": "#dfe5ee",
+    "input": "#dfe5ee",       # 输入框/文本区（比底色略深，呈内凹感）
+    "text": "#3a4356",
+    "text_dim": "#7b849a",
+    "accent": "#4c7df0",
+    "accent_hover": "#6a92f5",
+    "accent_pressed": "#3a66d8",
+    "success": "#43a468",
+    "danger": "#e05555",
+    "warn": "#d7922f",
+    "border": "#cdd5e2",      # 浅描边
+    "sel_bg": "#4c7df0",
+    "sel_text": "#ffffff",
+    "scroll_handle": "#c7cfdd",
     "ts": "#3d6ddb",
     "spk": "#3f9e52",
-    "body": "#2a2f4a",
+    "body": "#3a4356",
     "highlight": "255,214,10,110",
 }
 
@@ -77,7 +79,7 @@ def get_colors(mode: str = "dark") -> dict:
 def build_qss(mode: str = "dark") -> str:
     """生成整套 QSS 字符串。"""
     c = get_colors(mode)
-    return f"""
+    _qss = f"""
 /* ===== 全局 ===== */
 QWidget {{
     background-color: {c['bg']};
@@ -275,4 +277,169 @@ QScrollBar::handle:horizontal {{
 QScrollBar::handle:hover {{ background: {c['accent']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+"""
+    if mode == "light":
+        _qss += _NEO_QSS
+    return _qss
+
+
+# ---------------------------------------------------------------------------
+# 新拟态（Neumorphism）浅色专属样式 —— 追加在通用 QSS 之后覆盖
+# 近似实现：同色底 + 渐变模拟凸起/凹陷 + 大圆角 + 柔和描边（QSS 无 box-shadow）
+# ---------------------------------------------------------------------------
+_NEO_QSS = """
+/* ===== 面板：柔和的悬浮卡片（凸） ===== */
+QWidget#histPanel, QWidget#playBar {
+    background-color: #e6eaf1;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #edf1f7, stop:0.6 #e5eaf1, stop:1 #dfe4ec);
+    border: 1px solid #d3dae6;
+    border-radius: 14px;
+}
+QWidget#histPanel { border-top: 1px solid #f4f7fb; border-left: 1px solid #f4f7fb; }
+QWidget#playBar  { border-top: 1px solid #f4f7fb; border-left: 1px solid #f4f7fb; }
+
+/* ===== 通用按钮：同底渐变凸起，按压缩进 ===== */
+QPushButton {
+    background-color: #e8ecf3;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #f0f3f8, stop:0.55 #e6eaf1, stop:1 #dde3ec);
+    color: #3a4356;
+    border: 1px solid #c9d2e0;
+    border-top-color: #eef1f6;
+    border-left-color: #eef1f6;
+    border-radius: 12px;
+    padding: 6px 16px;
+    min-height: 18px;
+}
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #f4f6fb, stop:0.5 #eaeef5, stop:1 #e0e6ee);
+    border: 1px solid #b9c6d8;
+}
+QPushButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #d9dfe9, stop:0.55 #e3e8f0, stop:1 #eaeef5);
+    border: 1px solid #c2ccdb;
+    color: #2f3850;
+}
+QPushButton:disabled {
+    background-color: #eceff4;
+    color: #a7afbf;
+    border: 1px solid #dde3ec;
+}
+/* 彩色主按钮（id 选择器优先于上方通用规则，保持强调色） */
+QPushButton#btnTranscribe, QPushButton#btnSummarize {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #5f8bf2, stop:1 #4271e6);
+    color: #ffffff; border: 1px solid #4c7df0; border-radius: 12px; font-weight: bold;
+}
+QPushButton#btnTranscribe:hover, QPushButton#btnSummarize:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #6f97f4, stop:1 #527dea);
+}
+QPushButton#btnTranscribe:pressed, QPushButton#btnSummarize:pressed {
+    background: #3a66d8;
+}
+QPushButton#btnRecord {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #ee6f6f, stop:1 #d94a4a);
+    color: #ffffff; border: 1px solid #e05555; border-radius: 12px;
+}
+QPushButton#btnPlay {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #56b47e, stop:1 #3b9862);
+    color: #ffffff; border: 1px solid #43a468; border-radius: 12px;
+    min-width: 76px;
+}
+QPushButton#btnPlay:disabled { background-color:#eceff4; color:#a7afbf; border:1px solid #dde3ec; }
+QPushButton#btnConfig, QPushButton#btnLoadModel { border-radius: 12px; }
+QPushButton#btnLoadModel { border: 1px dashed #4c7df0; color: #3d6ddb; }
+
+/* ===== 输入/文本区：内凹 ===== */
+QLineEdit, QPlainTextEdit, QTextBrowser, QTextEdit {
+    background-color: #dfe5ee;
+    background: qlineargradient(x1:0, y1:1, x2:0, y2:0,
+                stop:0 #dbe1eb, stop:1 #e6ebf2);
+    color: #3a4356;
+    border: 1px solid #cbd3e1;
+    border-top: 1px solid #c3ccdb;
+    border-left: 1px solid #c3ccdb;
+    border-radius: 10px;
+    padding: 6px;
+    selection-background-color: #4c7df0;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextBrowser:focus, QTextEdit:focus {
+    border: 1px solid #4c7df0;
+}
+QComboBox {
+    background-color: #e6eaf1;
+    border: 1px solid #cbd3e1; border-radius: 10px;
+    padding: 5px 8px; min-height: 18px; color: #3a4356;
+}
+QComboBox:hover { border-color: #4c7df0; }
+QComboBox QAbstractItemView {
+    background-color: #e8ecf3; color: #3a4356;
+    border: 1px solid #cbd3e1; border-radius: 8px;
+    selection-background-color: #4c7df0; selection-color: #ffffff;
+    padding: 4px;
+}
+
+/* ===== 历史列表：透明底 + 圆角条目 ===== */
+QListWidget {
+    background: transparent;
+    border: none;
+    padding: 6px;
+}
+QListWidget::item {
+    background-color: #e6eaf1;
+    border: 1px solid #d5dce7;
+    border-top-color: #eef1f6;
+    border-left-color: #eef1f6;
+    border-radius: 10px;
+    padding: 7px 10px; margin: 3px 2px;
+    color: #3a4356;
+}
+QListWidget::item:hover { background-color: #eef1f6; }
+QListWidget::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #5f8bf2, stop:1 #3d6ddb);
+    color: #ffffff; border: 1px solid #3d6ddb;
+}
+
+/* ===== 播放进度滑块（内凹轨道 + 圆钮） ===== */
+QSlider::groove:horizontal {
+    height: 8px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #cdd5e2, stop:1 #e2e7ee);
+    border: 1px solid #cbd3e1; border-radius: 4px;
+}
+QSlider::sub-page:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #7aa2f5, stop:1 #4c7df0);
+    border-radius: 4px;
+}
+QSlider::add-page:horizontal { background: transparent; }
+QSlider::handle:horizontal {
+    width: 18px; margin: -6px 0;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #fbfcfe, stop:1 #e4e9f0);
+    border: 1px solid #b9c4d4; border-radius: 9px;
+}
+QSlider::handle:horizontal:hover { border-color: #4c7df0; }
+QSlider::handle:horizontal:disabled { background: #dfe4ec; border-color: #cbd3e1; }
+
+/* ===== 其余细节柔化 ===== */
+QMenu { background-color: #e8ecf3; border: 1px solid #cdd5e2; border-radius: 10px; padding: 6px; }
+QMenu::item { border-radius: 8px; color: #3a4356; }
+QMenu::item:selected { background-color: #4c7df0; color: #ffffff; }
+QMenu::separator { background: #cdd5e2; }
+QToolTip { background-color: #e8ecf3; color: #3a4356; border: 1px solid #cdd5e2; border-radius: 6px; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #c2cbda; border-radius: 5px; }
+QProgressBar { background-color: #dfe5ee; border: 1px solid #cdd5e2; border-radius: 8px; }
+QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #6a92f5, stop:1 #4c7df0); border-radius: 7px; }
+QSplitter::handle { background: #d3dae6; border-radius: 2px; }
+QSplitter::handle:hover { background: #4c7df0; }
 """
