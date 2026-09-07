@@ -216,7 +216,8 @@ DEFAULT_CONFIG = {
     "deepseek_api_key": "",
     "deepseek_base_url": "https://api.deepseek.com",
     "deepseek_model": "deepseek-chat",
-    "theme": "dark",
+    "theme": "light",
+    "summary_template": "meeting",
     "model_dir": "mod",           # 模型目录（相对 EXE 或绝对路径）
     "asr_model": "fun-asr-nano",  # 识别模型: fun-asr-nano / sensevoice / paraformer
     "vad_level": "medium",         # VAD 切句灵敏度: fine / medium / coarse
@@ -474,7 +475,11 @@ class TranscriptionWorker(QThread):
 # 8. 总结线程（DeepSeek API）
 # ---------------------------------------------------------------------------
 
-SUMMARY_PROMPT = """你是一名专业的会议纪要助理。请根据以下转录文本（含说话人和时间戳）生成结构化的会议纪要。
+# 总结模板（2026-09-07 新增多模板：会议/通话/待办/要点；可在工具栏下拉切换）
+SUMMARY_TEMPLATES = {
+    "meeting": (
+        "会议纪要",
+        """你是一名专业的会议纪要助理。请根据以下转录文本（含说话人和时间戳）生成结构化的会议纪要。
 
 要求：
 1. 用中文输出
@@ -498,8 +503,91 @@ SUMMARY_PROMPT = """你是一名专业的会议纪要助理。请根据以下转
 - [列出未解决的问题，没有则写"无"]
 
 转录文本：
-{transcript}
-"""
+{transcript}""",
+    ),
+    "call": (
+        "通话摘要",
+        """你是一名专业的通话摘要助理。请根据以下转录文本（含说话人和时间戳）整理一段简洁的通话纪要。
+
+要求：
+1. 用中文输出
+2. 按下面的 Markdown 结构组织
+3. 通话中没有的信息标注"未提及"，不要编造
+4. 重点提炼"双方达成的共识"与"下一步约定"，便于事后跟进
+
+## 通话概要
+- 双方：[说话人标签；若有真实姓名则使用]
+- 主要事项：[一句话概括这次通话讨论的核心内容]
+
+## 关键要点
+- [逐条列出通话中讨论/确认的重要事项]
+
+## 共识与结论
+- [双方明确达成一致的内容]
+
+## 后续行动 / 约定
+| 负责人 | 约定事项 | 时间/期限 |
+|--------|----------|-----------|
+| 未提及 | 未提及 | 未提及 |
+
+## 待澄清 / 遗留
+- [未解决或需后续确认的问题，没有则写"无"]
+
+转录文本：
+{transcript}""",
+    ),
+    "todos": (
+        "任务/待办提取",
+        """你是一名任务梳理助理。请根据以下转录文本（含说话人和时间戳）把所有"待办/行动项"提炼成结构化清单。
+
+要求：
+1. 用中文输出
+2. 只输出明确的待办（隐含或猜测的内容写"未提及"）
+3. 转录中无任何待办时，输出"未发现明确的待办事项"
+4. 严格使用下面的 Markdown 表格
+
+## 待办清单
+| # | 待办事项 | 负责人 | 截止时间 | 依据/上下文 |
+|---|----------|--------|----------|------------|
+| 1 | ... | ... | ... | 引自转录中相关发言 |
+
+## 跟进建议
+- [可选：对紧迫待办/无负责人的待办给出提醒]
+
+转录文本：
+{transcript}""",
+    ),
+    "knowledge": (
+        "知识/要点提炼",
+        """你是一名内容提炼助理。请根据以下转录文本（含说话人和时间戳）将其浓缩为结构化的知识要点。
+
+要求：
+1. 用中文输出
+2. 按下面的 Markdown 结构组织
+3. 提炼要点，不要逐字复述
+4. 转录中没有的内容标注"未提及"
+
+## 内容概要
+- [一句话总览转录主题]
+
+## 核心要点
+- [分条列出 3-7 条核心信息]
+
+## 关键概念 / 术语
+- [若涉及专业名词，列出来并简释]
+
+## 典型引述
+- [引用 1-3 条原话佐证要点；用 Markdown blockquote]
+
+## 可深入方向
+- [对想继续学习的读者给出建议]
+
+转录文本：
+{transcript}""",
+    ),
+}
+
+DEFAULT_SUMMARY_TEMPLATE = "meeting"
 
 
 class SummaryWorker(QThread):
@@ -507,12 +595,13 @@ class SummaryWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, transcript, api_key, base_url, model):
+    def __init__(self, transcript, api_key, base_url, model, prompt_text):
         super().__init__()
         self.transcript = transcript
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.prompt_text = prompt_text
 
     def run(self):
         try:
@@ -521,12 +610,12 @@ class SummaryWorker(QThread):
             if not self.api_key:
                 raise RuntimeError("DeepSeek API Key 为空")
             client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-            prompt = SUMMARY_PROMPT.format(transcript=self.transcript)
+            prompt = self.prompt_text.format(transcript=self.transcript)
             logger.info(f"调用 DeepSeek 总结 (model={self.model})")
             resp = client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "你是一名专业的会议纪要助理。"},
+                    {"role": "system", "content": "你是一名专业的内容助理。"},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.3,
@@ -826,6 +915,19 @@ class ConfigDialog(NfDialog):
         self.theme_combo.setToolTip("切换后立即生效（浅色为新拟态柔和风格）。")
         form.addRow("界面主题：", self.theme_combo)
 
+        # 总结模板（2026-09-07：工具栏可即时切换，这里可同步设置）
+        self.summary_tpl_combo = QComboBox()
+        for _k, (_label, _) in SUMMARY_TEMPLATES.items():
+            self.summary_tpl_combo.addItem(_label, _k)
+        self.summary_tpl_combo.setToolTip(
+            "选择 AI 总结模板。也可在工具栏即时切换。\n"
+            "会议纪要：标准结构（会议/决策/行动/遗留）\n"
+            "通话摘要：双方案要+共识+后续约定\n"
+            "任务待办：自动提炼所有待办清单\n"
+            "知识要点：讲座/学习等转录的要点提炼"
+        )
+        form.addRow("总结模板：", self.summary_tpl_combo)
+
         layout.addLayout(form)
 
         tip = QLabel("提示：API Key 仅保存在本地 config.json，不会上传。")
@@ -869,8 +971,12 @@ class ConfigDialog(NfDialog):
         _idx_spk = self.spk_combo.findData(_n)
         self.spk_combo.setCurrentIndex(_idx_spk if _idx_spk >= 0 else 0)
         # 恢复主题选择
-        idx_theme = self.theme_combo.findData(self.config.get("theme", "dark"))
+        idx_theme = self.theme_combo.findData(self.config.get("theme", "light"))
         self.theme_combo.setCurrentIndex(idx_theme if idx_theme >= 0 else 0)
+        # 恢复总结模板
+        _idx_tpl = self.summary_tpl_combo.findData(
+            self.config.get("summary_template", DEFAULT_SUMMARY_TEMPLATE))
+        self.summary_tpl_combo.setCurrentIndex(_idx_tpl if _idx_tpl >= 0 else 0)
 
     def _on_accept(self):
         key = self.api_key_edit.text().strip()
@@ -891,6 +997,7 @@ class ConfigDialog(NfDialog):
         cur_theme = self.theme_combo.currentData()
         if cur_theme:
             self.config.set("theme", cur_theme)
+        self.config.set("summary_template", self.summary_tpl_combo.currentData() or DEFAULT_SUMMARY_TEMPLATE)
         self.config.save()
         logger.info(f"配置已更新（asr_model={cur}, vad_level={cur_vad}, theme={cur_theme}）")
         self.accept()
@@ -1007,7 +1114,7 @@ class MainWindow(QMainWindow):
         self._preload_sig = None
         self._preload_poll_timer = None
         # 阶段 E：当前主题配色（富文本/高亮用），由 _apply_theme 更新
-        self._palette = get_colors(self.config.get("theme", "dark"))
+        self._palette = get_colors(self.config.get("theme", "light"))
 
         # ---- 阶段 C：播放器状态 ----
         self.player = None
@@ -1328,6 +1435,17 @@ class MainWindow(QMainWindow):
         sh = QHBoxLayout()
         sh.addWidget(QLabel("📋 会议纪要"))
         sh.addStretch(1)
+        # 总结模板下拉（2026-09-07：会议/通话/待办/要点四套）
+        self.cmb_summary_tpl = QComboBox()
+        self.cmb_summary_tpl.setObjectName("cmbSummaryTpl")
+        for _k, (_label, _) in SUMMARY_TEMPLATES.items():
+            self.cmb_summary_tpl.addItem(_label, _k)
+        self.cmb_summary_tpl.setToolTip("选择 AI 总结模板。可随时切换，下次生成时生效。")
+        self.cmb_summary_tpl.setCurrentIndex(
+            self.cmb_summary_tpl.findData(self.config.get("summary_template", DEFAULT_SUMMARY_TEMPLATE))
+        )
+        self.cmb_summary_tpl.currentIndexChanged.connect(self._on_summary_tpl_changed)
+        sh.addWidget(self.cmb_summary_tpl)
         self.btn_summarize = QPushButton("✨ 生成纪要")
         self.btn_summarize.setObjectName("btnSummarize")
         self.btn_export = QPushButton("💾 导出纪要")
@@ -1491,7 +1609,7 @@ class MainWindow(QMainWindow):
             "首次使用请先配置 DeepSeek API Key（用于生成会议纪要）。\n"
             "语音识别模型放在程序目录的 mod/ 文件夹内。",
         )
-        _old_theme = self.config.get("theme", "dark")
+        _old_theme = self.config.get("theme", "light")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
         # 配置弹窗可能修改了主题/识别模型：主题立即生效 + 重置并重新预加载
@@ -2443,25 +2561,38 @@ class MainWindow(QMainWindow):
             return
         api_key = self.config.get("deepseek_api_key", "")
         if not api_key:
-            _old_theme = self.config.get("theme", "dark")
+            _old_theme = self.config.get("theme", "light")
             dlg = ConfigDialog(self.config, self)
             if not dlg.exec():
                 return
-            self._reapply_theme_if_changed(_old_theme)   # 主题若在弹窗里改了要立即生效
+            self._reapply_theme_if_changed(_old_theme)
             api_key = self.config.get("deepseek_api_key", "")
             if not api_key:
                 return
-        self._set_busy(True, "正在生成纪要…")
+        # 总结模板（2026-09-07）：按用户当前选择的模板生成
+        _key = self.config.get("summary_template", DEFAULT_SUMMARY_TEMPLATE)
+        if _key not in SUMMARY_TEMPLATES:
+            _key = DEFAULT_SUMMARY_TEMPLATE
+        _prompt = SUMMARY_TEMPLATES[_key][1]
+        self._set_busy(True, f"正在生成纪要（{SUMMARY_TEMPLATES[_key][0]}）…")
         self.txt_summary.setPlainText("纪要生成中，请稍候…")
         self.summarizer = SummaryWorker(
             transcript=transcript,
             api_key=api_key,
             base_url=self.config.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"]),
             model=self.config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"]),
+            prompt_text=_prompt,
         )
         self.summarizer.finished.connect(self._on_summary_finished)
         self.summarizer.error.connect(self._on_summary_error)
         self.summarizer.start()
+
+    def _on_summary_tpl_changed(self, _idx: int):
+        """工具栏下拉切换总结模板：立即写入 config，状态栏提示。"""
+        _key = self.cmb_summary_tpl.currentData()
+        if _key and _key in SUMMARY_TEMPLATES:
+            self.config.set("summary_template", _key)
+            self.lbl_status.setText(f"已切换总结模板：{SUMMARY_TEMPLATES[_key][0]}")
 
     def _on_summary_finished(self, summary):
         logger.info("总结完成回调")
@@ -2514,7 +2645,7 @@ class MainWindow(QMainWindow):
         old_model = self.config.get("asr_model", "fun-asr-nano")
         old_dir = self.config.get("model_dir", "mod")
         old_vad = self.config.get("vad_level", "medium")
-        old_theme = self.config.get("theme", "dark")
+        old_theme = self.config.get("theme", "light")
         dlg = ConfigDialog(self.config, self)
         dlg.exec()
         new_model = self.config.get("asr_model", old_model)
@@ -2579,7 +2710,7 @@ class MainWindow(QMainWindow):
         挂在 QApplication 上，使 QDialog / QMenu / QMessageBox 等子窗口同样生效。
         富文本配色同步更新，并按需重渲染转写区（HTML inline 色随主题变化）。
         """
-        theme = self.config.get("theme", "dark")
+        theme = self.config.get("theme", "light")
         logger.info(f"应用主题: {theme}")
         qss = build_qss(theme)
         self._palette = get_colors(theme)
@@ -2594,7 +2725,7 @@ class MainWindow(QMainWindow):
 
     def _reapply_theme_if_changed(self, old_theme: str):
         """配置弹窗关闭后：若主题变了立即整套应用（修复浅色/深色“切了不生效”）。"""
-        if self.config.get("theme", "dark") != old_theme:
+        if self.config.get("theme", "light") != old_theme:
             logger.info(f"主题变更 {old_theme} -> {self.config.get('theme')}，立即应用")
             self._apply_theme()
 
