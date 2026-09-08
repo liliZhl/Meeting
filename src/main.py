@@ -2394,17 +2394,18 @@ class MainWindow(QMainWindow):
             logger.error(f"新建记录失败: {e}")
             NfMessage.warn(self, "新建失败", str(e))
 
-    def _auto_archive(self, wav_path: str, source: str = "recorded", title: str = ""):
+    def _auto_archive(self, wav_path: str, source: str = "recorded", title: str = "") -> str | None:
         """录音/导入完成后自动归档为一条历史记录。
 
         - 复制 16k wav 进记录目录（播放/转写对齐）
         - 更新索引，刷新左侧列表并选中新记录
+        返回新记录 id（失败返回 None）。
         """
         if self.store is None:
-            return
+            return None
         try:
             if not wav_path or not Path(wav_path).exists():
-                return
+                return None
             dur = 0.0
             try:
                 import wave as _w
@@ -2433,8 +2434,10 @@ class MainWindow(QMainWindow):
                 self.btn_play.setEnabled(True)
                 self.btn_play_stop.setEnabled(True)
             logger.info(f"自动归档记录: {rid} source={source} dur={dur:.1f}s")
+            return rid
         except Exception as e:
             logger.error(f"自动归档失败: {e}")
+            return None
 
     # ---------- 事件：录音 ----------
     def on_record_clicked(self):
@@ -2512,16 +2515,22 @@ class MainWindow(QMainWindow):
             self._update_audio_duration(converted)
             self.lbl_status.setText(f"已导入: {Path(fpath).name}")
             # 阶段 B：导入自动归档为一条历史记录
-            self._auto_archive(converted, source="imported", title=Path(fpath).stem)
-            # 2026-09-08：归档成功后删除转换临时 wav（播放已切到 records/audio）
-            if (str(converted) != str(fpath)
-                    and Path(converted).parent == Path(tempfile.gettempdir())
-                    and Path(converted).exists()):
-                try:
-                    Path(converted).unlink()
-                    logger.debug(f"已清理导入转换临时文件: {converted}")
-                except Exception:
-                    pass
+            rid = self._auto_archive(converted, source="imported", title=Path(fpath).stem)
+            # 2026-09-08 修复：转写/播放一律改走 records 副本，再清理转换临时 wav
+            # （此前先删 tmp 而 current_audio 仍指向它，点转写报 Audio file not found）
+            if rid:
+                rec_audio = self.store.audio_path(rid)
+                if Path(rec_audio).exists():
+                    self.current_audio = str(rec_audio)
+                    self._play_source_path = ""   # 强制下次 set_source 用 records 副本
+                if (str(converted) != str(fpath)
+                        and Path(converted).parent == Path(tempfile.gettempdir())
+                        and Path(converted).exists()):
+                    try:
+                        Path(converted).unlink()
+                        logger.debug(f"已清理导入转换临时文件: {converted}")
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"导入失败: {e}")
             NfMessage.warn(self, "导入失败", str(e))
