@@ -145,7 +145,7 @@ a = Analysis(
     ["src/main.py"],
     pathex=["src"],
     binaries=binaries,
-    datas=datas,
+    datas=datas + [("src/app.ico", ".")],   # 2026-09-09：运行期窗口/任务栏图标随包
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -185,7 +185,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon="src/app.ico",       # 2026-09-09：EXE 文件图标（资源管理器/任务栏）
 )
 
 coll = COLLECT(

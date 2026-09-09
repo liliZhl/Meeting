@@ -140,6 +140,7 @@ try:
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent, QUrl
     from PyQt6.QtGui import (
         QFont, QTextCursor, QCloseEvent, QTextCharFormat, QColor, QCursor,
+        QIcon,
     )
     PYQT_OK = True
 
@@ -2939,6 +2940,18 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("智能会议纪要工具")
+
+    # 2026-09-09：设置应用图标（窗口/任务栏）。dev 与 frozen 都从 APP_DIR/app.ico
+    try:
+        if getattr(sys, "frozen", False):
+            _app_dir = Path(sys.executable).parent
+        else:
+            _app_dir = Path(__file__).resolve().parent
+        _icon_path = _app_dir / "app.ico"
+        if _icon_path.exists():
+            app.setWindowIcon(QIcon(str(_icon_path)))
+    except Exception as e:
+        logger.warning(f"设置应用图标失败: {e}")
 
     click_logger = ClickLogger(app)
     app.installEventFilter(click_logger)
