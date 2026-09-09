@@ -2941,15 +2941,19 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("智能会议纪要工具")
 
-    # 2026-09-09：设置应用图标（窗口/任务栏）。dev 与 frozen 都从 APP_DIR/app.ico
+    # 2026-09-09：设置应用图标（窗口/任务栏）。dev 用 src/app.ico；
+    # frozen 兼容 EXE 同级与 _internal/ 两处（onedir datas 通常落 _internal）
     try:
         if getattr(sys, "frozen", False):
             _app_dir = Path(sys.executable).parent
+            _icon_cands = [_app_dir / "app.ico",
+                           _app_dir / "_internal" / "app.ico"]
         else:
-            _app_dir = Path(__file__).resolve().parent
-        _icon_path = _app_dir / "app.ico"
-        if _icon_path.exists():
-            app.setWindowIcon(QIcon(str(_icon_path)))
+            _icon_cands = [Path(__file__).resolve().parent / "app.ico"]
+        for _ic in _icon_cands:
+            if _ic.exists():
+                app.setWindowIcon(QIcon(str(_ic)))
+                break
     except Exception as e:
         logger.warning(f"设置应用图标失败: {e}")
 
