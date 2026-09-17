@@ -21,6 +21,13 @@ dist_backup*/
 # ===== 运行时（模型 / ffmpeg / FunASR 源码 / wheels，体积大且可再生）=====
 runtime/
 
+# ===== 模型与 ffmpeg（自行下载，指引见 mod/README.md 与 bin/README.md）=====
+# 内容全部忽略，仅保留目录内的说明文件，避免误提交数 GB 大文件
+mod/*
+!mod/README.md
+bin/*
+!bin/README.md
+
 # ===== 运行时生成 =====
 logs/
 recordings/
